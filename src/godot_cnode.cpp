@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -44,6 +45,12 @@
 extern "C" {
 #include "ei.h"
 #include "ei_connect.h"
+}
+
+/* Forward declaration - ei_default_socket_callbacks is not in public headers */
+/* We'll access it via the ei_cnode structure after initialization */
+extern "C" {
+extern ei_socket_callbacks ei_default_socket_callbacks;
 }
 
 // Godot-cpp includes
@@ -352,6 +359,129 @@ static int handle_call(char *buf, int *index, int fd);
 static int handle_cast(char *buf, int *index);
 static void send_reply(ei_x_buff *x, int fd);
 
+/* Custom socket callbacks for macOS compatibility */
+/* macOS doesn't support SO_ACCEPTCONN, so we need a custom accept implementation */
+
+/* Helper to extract FD from context (same as default implementation) */
+#define EI_DFLT_CTX_TO_FD__(CTX, FD)      \
+	((intptr_t)(CTX) < 0                  \
+					? (*(FD) = -1, EBADF) \
+					: (*(FD) = (int)(intptr_t)(CTX), 0))
+
+/* Helper to convert FD to context */
+#define EI_FD_AS_CTX__(FD) ((void *)(intptr_t)(FD))
+
+/* macOS-compatible accept callback */
+/* This is allowed to call accept() directly - it's the intended use in callbacks */
+static int macos_tcp_accept(void **ctx, void *addr, int *len, unsigned unused) {
+	int fd, res;
+	socklen_t addr_len = (socklen_t)*len;
+
+	if (!ctx)
+		return EINVAL;
+
+	/* Extract file descriptor from context */
+	res = EI_DFLT_CTX_TO_FD__(*ctx, &fd);
+	if (res)
+		return res;
+
+	/* Ensure socket is in blocking mode (not non-blocking) */
+	/* This helps avoid macOS-specific issues */
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags >= 0) {
+		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+	}
+
+	/* Call accept() directly - this is allowed in callbacks */
+	res = accept(fd, (struct sockaddr *)addr, &addr_len);
+	if (res < 0) {
+		return errno;
+	}
+
+	*len = (int)addr_len;
+
+	/* Store accepted socket in context */
+	*ctx = EI_FD_AS_CTX__(res);
+	return 0;
+}
+
+/* Wrapper functions that delegate to default callbacks */
+/* ei_default_socket_callbacks is declared as extern in the library */
+
+static int custom_socket(void **ctx, void *setup_ctx) {
+	return ei_default_socket_callbacks.socket(ctx, setup_ctx);
+}
+
+static int custom_close(void *ctx) {
+	return ei_default_socket_callbacks.close(ctx);
+}
+
+static int custom_listen(void *ctx, void *addr, int *len, int backlog) {
+	return ei_default_socket_callbacks.listen(ctx, addr, len, backlog);
+}
+
+static int custom_connect(void *ctx, void *addr, int len, unsigned tmo) {
+	return ei_default_socket_callbacks.connect(ctx, addr, len, tmo);
+}
+
+static int custom_writev(void *ctx, const void *iov, int iovcnt, ssize_t *len, unsigned tmo) {
+	if (ei_default_socket_callbacks.writev) {
+		return ei_default_socket_callbacks.writev(ctx, iov, iovcnt, len, tmo);
+	}
+	return ENOTSUP;
+}
+
+static int custom_write(void *ctx, const char *buf, ssize_t *len, unsigned tmo) {
+	return ei_default_socket_callbacks.write(ctx, buf, len, tmo);
+}
+
+static int custom_read(void *ctx, char *buf, ssize_t *len, unsigned tmo) {
+	return ei_default_socket_callbacks.read(ctx, buf, len, tmo);
+}
+
+static int custom_handshake_packet_header_size(void *ctx, int *sz) {
+	return ei_default_socket_callbacks.handshake_packet_header_size(ctx, sz);
+}
+
+static int custom_connect_handshake_complete(void *ctx) {
+	return ei_default_socket_callbacks.connect_handshake_complete(ctx);
+}
+
+static int custom_accept_handshake_complete(void *ctx) {
+	return ei_default_socket_callbacks.accept_handshake_complete(ctx);
+}
+
+static int custom_get_fd(void *ctx, int *fd) {
+	return ei_default_socket_callbacks.get_fd(ctx, fd);
+}
+
+/* Custom socket callbacks structure */
+/* Most callbacks delegate to default implementations, only accept is custom */
+static ei_socket_callbacks custom_socket_callbacks = {
+	0, /* flags */
+	custom_socket,
+	custom_close,
+	custom_listen,
+	macos_tcp_accept, /* accept - custom macOS-compatible implementation */
+	custom_connect,
+#ifdef __APPLE__
+/* On macOS, check if writev is available */
+#ifdef EI_HAVE_STRUCT_IOVEC__
+	custom_writev,
+#else
+	NULL,
+#endif
+#else
+	custom_writev,
+#endif
+	custom_write,
+	custom_read,
+	custom_handshake_packet_header_size,
+	custom_connect_handshake_complete,
+	custom_accept_handshake_complete,
+	custom_get_fd
+};
+
 /*
  * Initialize the CNode
  */
@@ -394,11 +524,55 @@ int init_cnode(char *nodename, char *cookie) {
 	/* Note: ei_init() must be called before ei_connect_init() on some systems (especially macOS) */
 	ei_init();
 
-	/* ei_connect_init returns 0 on success, negative on error */
-	res = ei_connect_init(&ec, nodename, cookie, 0);
+	/* Extract hostname and alivename from nodename (format: "name@hostname") */
+	char thishostname[EI_MAXHOSTNAMELEN + 1] = { 0 };
+	char thisalivename[EI_MAXALIVELEN + 1] = { 0 };
+	char thisnodename[MAXNODELEN + 1] = { 0 };
+
+	char *at_pos = strchr(nodename, '@');
+	if (at_pos == nullptr) {
+		fprintf(stderr, "ei_connect_xinit_ussi: invalid nodename format (must be 'name@hostname'): %s\n", nodename);
+		return -1;
+	}
+
+	/* Extract alivename (part before @) */
+	size_t alivename_len = at_pos - nodename;
+	if (alivename_len >= sizeof(thisalivename)) {
+		alivename_len = sizeof(thisalivename) - 1;
+	}
+	strncpy(thisalivename, nodename, alivename_len);
+	thisalivename[alivename_len] = '\0';
+
+	/* Extract hostname (part after @) */
+	const char *hostname = at_pos + 1;
+	if (strlen(hostname) >= sizeof(thishostname)) {
+		fprintf(stderr, "ei_connect_xinit_ussi: hostname too long: %s\n", hostname);
+		return -1;
+	}
+	strncpy(thishostname, hostname, sizeof(thishostname) - 1);
+	thishostname[sizeof(thishostname) - 1] = '\0';
+
+	/* Full nodename */
+	if (strlen(nodename) >= sizeof(thisnodename)) {
+		fprintf(stderr, "ei_connect_xinit_ussi: nodename too long: %s\n", nodename);
+		return -1;
+	}
+	strncpy(thisnodename, nodename, sizeof(thisnodename) - 1);
+	thisnodename[sizeof(thisnodename) - 1] = '\0';
+
+	/* Use ei_connect_xinit_ussi with custom socket callbacks for macOS compatibility */
+	/* This allows us to override the accept callback without patching the library */
+	res = ei_connect_xinit_ussi(&ec, thishostname, thisalivename, thisnodename,
+			NULL, /* thisipaddr - not used */
+			cookie, 0, /* creation */
+			&custom_socket_callbacks,
+			sizeof(custom_socket_callbacks),
+			NULL); /* setup_context */
 	if (res < 0) {
-		fprintf(stderr, "ei_connect_init failed: %d (errno: %d, %s)\n", res, errno, strerror(errno));
+		fprintf(stderr, "ei_connect_xinit_ussi failed: %d (errno: %d, %s)\n", res, errno, strerror(errno));
 		fprintf(stderr, "  nodename: %s\n", nodename);
+		fprintf(stderr, "  thishostname: %s\n", thishostname);
+		fprintf(stderr, "  thisalivename: %s\n", thisalivename);
 		fprintf(stderr, "  cookie: %s (length: %zu)\n", cookie, strlen(cookie));
 		return -1;
 	}
@@ -464,6 +638,10 @@ int init_cnode(char *nodename, char *cookie) {
 		fprintf(stderr, "Godot CNode: Invalid listen_fd after initialization\n");
 		return -1;
 	}
+
+	/* BINARY SEARCH: Test 1 - Minimal configuration (no socket options) */
+	/* Test if ei_accept() works with socket as-is from ei_listen() */
+	printf("Godot CNode: BINARY SEARCH Test 1: No socket options set\n");
 
 	printf("Godot CNode: Socket ready for accepting connections (fd: %d, port: %d)\n", listen_fd, port);
 	return 0;
@@ -1145,50 +1323,16 @@ void main_loop() {
 		/* Accept connection from Erlang/Elixir node */
 		/* Use blocking ei_accept - this is the standard way for CNode servers */
 		/* ei_accept() handles the Erlang distribution protocol handshake automatically */
-		static int accept_attempts = 0;
-		accept_attempts++;
-		if (accept_attempts == 1 || accept_attempts % 10 == 0) {
-			printf("Godot CNode: Waiting for connection on listen_fd: %d (attempt %d)...\n", listen_fd, accept_attempts);
+		/* Custom socket callbacks provide macOS-compatible accept implementation */
 
-			/* Check socket state */
-			int socket_error = 0;
-			socklen_t error_len = sizeof(socket_error);
-			if (getsockopt(listen_fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0) {
-				if (socket_error != 0) {
-					fprintf(stderr, "Godot CNode: Socket error: %d (%s)\n", socket_error, strerror(socket_error));
-				} else {
-					printf("Godot CNode: Socket state OK (no errors)\n");
-				}
-			}
+		/* Use select() to wait for connection */
+		fd_set read_fds;
+		FD_ZERO(&read_fds);
+		FD_SET(listen_fd, &read_fds);
+		select(listen_fd + 1, &read_fds, NULL, NULL, NULL);
 
-			/* Check if socket is listening */
-			int optval;
-			socklen_t optlen = sizeof(optval);
-			if (getsockopt(listen_fd, SOL_SOCKET, SO_ACCEPTCONN, &optval, &optlen) == 0) {
-				printf("Godot CNode: Socket SO_ACCEPTCONN: %d\n", optval);
-			}
-
-			/* Get socket address info */
-			struct sockaddr_in addr;
-			socklen_t addr_len = sizeof(addr);
-			if (getsockname(listen_fd, (struct sockaddr *)&addr, &addr_len) == 0) {
-				char ip_str[INET_ADDRSTRLEN];
-				inet_ntop(AF_INET, &addr.sin_addr, ip_str, INET_ADDRSTRLEN);
-				printf("Godot CNode: Socket bound to %s:%d\n", ip_str, ntohs(addr.sin_port));
-			}
-
-			/* Check pending connections */
-			int pending = 0;
-			if (ioctl(listen_fd, FIONREAD, &pending) == 0) {
-				printf("Godot CNode: Pending bytes in socket buffer: %d\n", pending);
-			}
-		}
-
-		/* Use ei_accept() - standard erl_interface approach for CNode servers */
-		/* ei_accept() handles the Erlang distribution protocol handshake automatically */
-		if (accept_attempts == 1 || accept_attempts % 10 == 0) {
-			printf("Godot CNode: Calling ei_accept() (blocking, waiting for connection)...\n");
-			fflush(stdout);
+		if (!FD_ISSET(listen_fd, &read_fds)) {
+			continue;
 		}
 
 		ErlConnect con;
@@ -1205,15 +1349,11 @@ void main_loop() {
 				break;
 			} else if (saved_errno == ECONNABORTED || saved_errno == 53) {
 				/* Connection aborted - retry */
-				if (accept_attempts % 10 == 0) {
-					printf("Godot CNode: Connection aborted (errno: %d), retrying...\n", saved_errno);
-				}
+				printf("Godot CNode: Connection aborted (errno: %d), retrying...\n", saved_errno);
 				continue;
 			} else if (saved_errno == EINTR) {
 				/* Interrupted by signal - retry */
-				if (accept_attempts % 10 == 0) {
-					printf("Godot CNode: ei_accept() interrupted, retrying...\n");
-				}
+				printf("Godot CNode: ei_accept() interrupted, retrying...\n");
 				continue;
 			} else {
 				/* Other error - log details and retry after short delay */
