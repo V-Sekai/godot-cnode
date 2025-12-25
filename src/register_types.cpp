@@ -50,12 +50,14 @@ static void cnode_server_thread() {
     
     cnode_running = false;
     
-    // Cleanup: destroy all instances
+    // Cleanup: clear all instances
     for (int i = 0; i < MAX_INSTANCES; i++) {
-        if (instances[i].instance != NULL) {
+        if (instances[i].id != 0) {
             // Note: In GDExtension, we don't destroy Godot instances
             // The instances array is just for tracking
-            instances[i].instance = NULL;
+            instances[i].id = 0;
+            instances[i].scene_tree = nullptr;
+            instances[i].started = 0;
         }
     }
 }

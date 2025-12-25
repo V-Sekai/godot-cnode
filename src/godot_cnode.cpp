@@ -8,7 +8,9 @@
  */
 
 // Define POSIX feature test macros BEFORE any includes to ensure timespec is defined
+#ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200112L
 
 // Include C headers that define timespec BEFORE any C++ headers
@@ -16,6 +18,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <unistd.h>
 #include <cstring>
 
 extern "C" {
@@ -34,7 +37,6 @@ extern "C" {
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/node_path.hpp>
 #include <godot_cpp/core/object.hpp>
-#include <godot_cpp/core/object_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "godot_cnode.h"
@@ -57,13 +59,13 @@ static SceneTree *get_scene_tree() {
 /* Get root node from scene tree */
 static Node *get_scene_tree_root(SceneTree *tree) {
     if (tree == nullptr) return nullptr;
-    return tree->get_root();
+    return tree->get_current_scene();
 }
 
 /* Find node by path */
 static Node *find_node_by_path(SceneTree *tree, const char *path_str) {
     if (tree == nullptr || path_str == nullptr) return nullptr;
-    Node *root = tree->get_root();
+    Node *root = tree->get_current_scene();
     if (root == nullptr) return nullptr;
     NodePath path = NodePath(String::utf8(path_str));
     return root->get_node_or_null(path);
