@@ -369,34 +369,34 @@ static int process_message(char *buf, int *index, int fd) {
 		UtilityFunctions::printerr("Error: null pointer in process_message");
 		return -1;
 	}
-	
+
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
 		UtilityFunctions::printerr("Error: invalid file descriptor in process_message");
 		return -1;
 	}
-	
+
 	int arity;
 	char atom[MAXATOMLEN];
 	int saved_index = *index;
-	
+
 	/* Decode the message */
 	if (ei_decode_version(buf, index, NULL) < 0) {
 		UtilityFunctions::printerr("Error decoding version");
 		return -1;
 	}
-	
+
 	if (ei_decode_tuple_header(buf, index, &arity) < 0) {
 		UtilityFunctions::printerr("Error decoding tuple header");
 		return -1;
 	}
-	
+
 	/* Get the message type atom */
 	if (ei_decode_atom(buf, index, atom) < 0) {
 		UtilityFunctions::printerr("Error decoding atom");
 		return -1;
 	}
-	
+
 	/* Handle GenServer-style messages: {'$gen_call', {From, Tag}, Request} or {'$gen_cast', Request} */
 	if (strcmp(atom, "$gen_call") == 0) {
 		/* GenServer call: {'$gen_call', {From, Tag}, Request} */
@@ -467,7 +467,8 @@ static godot_instance_t *get_current_instance() {
 
 /* Helper: Get object by instance ID (generic, not just Node) */
 static Object *get_object_by_id(int64_t object_id) {
-	if (object_id == 0) return nullptr;
+	if (object_id == 0)
+		return nullptr;
 	ObjectID obj_id = ObjectID((uint64_t)object_id);
 	Object *obj = ObjectDB::get_instance(obj_id);
 	return obj;
@@ -477,11 +478,11 @@ static Object *get_object_by_id(int64_t object_id) {
 static void encode_method_info(const Dictionary &method, ei_x_buff *x) {
 	ei_x_encode_tuple_header(x, 4);
 	ei_x_encode_string(x, method["name"].operator String().utf8().get_data());
-	
+
 	Dictionary return_val = method["return"];
 	int return_type = return_val["type"];
 	ei_x_encode_long(x, return_type);
-	
+
 	Array args = method["args"];
 	ei_x_encode_list_header(x, args.size());
 	for (int i = 0; i < args.size(); i++) {
@@ -491,7 +492,7 @@ static void encode_method_info(const Dictionary &method, ei_x_buff *x) {
 		ei_x_encode_long(x, arg["type"]);
 	}
 	ei_x_encode_empty_list(x);
-	
+
 	ei_x_encode_long(x, method["flags"]);
 }
 
@@ -512,13 +513,13 @@ static int handle_call(char *buf, int *index, int fd) {
 		UtilityFunctions::printerr("Error: null pointer in handle_call");
 		return -1;
 	}
-	
+
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
 		UtilityFunctions::printerr("Error: invalid file descriptor in handle_call");
 		return -1;
 	}
-	
+
 	ei_x_buff reply;
 
 	/* Initialize reply buffer */
@@ -538,7 +539,7 @@ static int handle_call(char *buf, int *index, int fd) {
 	/* Decode Module and Function from Request tuple */
 	char module[256];
 	char function[256];
-	
+
 	if (ei_decode_atom(buf, index, module) < 0) {
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
@@ -547,7 +548,7 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_free(&reply);
 		return -1;
 	}
-	
+
 	if (ei_decode_atom(buf, index, function) < 0) {
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
@@ -556,7 +557,7 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_free(&reply);
 		return -1;
 	}
-	
+
 	// Decode arguments (remaining elements in Request tuple)
 	Array args;
 	if (request_arity > 2) {
@@ -565,341 +566,342 @@ static int handle_call(char *buf, int *index, int fd) {
 			args = args_array.operator Array();
 		}
 	}
-	
+
 	// Route based on module
 	if (strcmp(module, "godot") == 0) {
-				// Generic Godot API calls
-				if (strcmp(function, "call_method") == 0) {
-					// {call, godot, call_method, [ObjectID, MethodName, Args]}
-					if (args.size() < 2) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						int64_t object_id = args[0].operator int64_t();
-						String method_name = args[1].operator String();
-						
-						// Guard: Check for valid object ID
-						if (object_id == 0) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "invalid_object_id");
-						} else if (method_name.is_empty()) {
-							// Guard: Check method name is not empty
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "empty_method_name");
-						} else {
-							Array method_args;
-							if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
-								method_args = args[2].operator Array();
-							}
-							
-							Object *obj = get_object_by_id(object_id);
-							if (obj == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "object_not_found");
-							} else {
-								Variant result = obj->callv(method_name, method_args);
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								variant_to_bert(result, &reply);
-							}
-						}
-					}
-				} else if (strcmp(function, "get_property") == 0) {
-					// {call, godot, get_property, [ObjectID, PropertyName]}
-					if (args.size() < 2) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						int64_t object_id = args[0].operator int64_t();
-						String prop_name = args[1].operator String();
-						
-						// Guard: Check for valid object ID
-						if (object_id == 0) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "invalid_object_id");
-						} else if (prop_name.is_empty()) {
-							// Guard: Check property name is not empty
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "empty_property_name");
-						} else {
-							Object *obj = get_object_by_id(object_id);
-							if (obj == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "object_not_found");
-							} else {
-								Variant value = obj->get(prop_name);
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								variant_to_bert(value, &reply);
-							}
-						}
-					}
-				} else if (strcmp(function, "set_property") == 0) {
-					// {call, godot, set_property, [ObjectID, PropertyName, Value]}
-					if (args.size() < 3) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						int64_t object_id = args[0].operator int64_t();
-						String prop_name = args[1].operator String();
-						Variant value = args[2];
-						
-						// Guard: Check for valid object ID
-						if (object_id == 0) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "invalid_object_id");
-						} else if (prop_name.is_empty()) {
-							// Guard: Check property name is not empty
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "empty_property_name");
-						} else {
-							Object *obj = get_object_by_id(object_id);
-							if (obj == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "object_not_found");
-							} else {
-								obj->set(prop_name, value);
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								ei_x_encode_atom(&reply, "ok");
-							}
-						}
-					}
-				} else if (strcmp(function, "get_singleton") == 0) {
-					// {call, godot, get_singleton, [SingletonName]}
-					if (args.size() < 1) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						String singleton_name = args[0].operator String();
-						Engine *engine = Engine::get_singleton();
-						if (engine == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "engine_unavailable");
-						} else {
-							Object *singleton = engine->get_singleton_object(StringName(singleton_name));
-							if (singleton == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "singleton_not_found");
-							} else {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								ei_x_encode_tuple_header(&reply, 3);
-								ei_x_encode_atom(&reply, "object");
-								ei_x_encode_string(&reply, singleton->get_class().utf8().get_data());
-								ei_x_encode_long(&reply, (int64_t)singleton->get_instance_id());
-							}
-						}
-					}
-				} else if (strcmp(function, "create_object") == 0) {
-					// {call, godot, create_object, [ClassName]}
-					if (args.size() < 1) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						String class_name = args[0].operator String();
-						ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-						if (class_db == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "classdb_unavailable");
-						} else {
-							// Use ClassDB to instantiate the class
-							Object *obj = ClassDB::instantiate(StringName(class_name));
-							if (obj == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "class_not_found_or_not_instantiable");
-							} else {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								ei_x_encode_tuple_header(&reply, 3);
-								ei_x_encode_atom(&reply, "object");
-								ei_x_encode_string(&reply, obj->get_class().utf8().get_data());
-								ei_x_encode_long(&reply, (int64_t)obj->get_instance_id());
-							}
-						}
-					}
-				} else if (strcmp(function, "list_classes") == 0) {
-					// {call, godot, list_classes, []}
-					ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-					if (class_db == nullptr) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "classdb_unavailable");
-					} else {
-						Array classes = class_db->get_class_list();
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "reply");
-						ei_x_encode_list_header(&reply, classes.size());
-						for (int i = 0; i < classes.size(); i++) {
-							String class_name = classes[i];
-							ei_x_encode_string(&reply, class_name.utf8().get_data());
-						}
-						ei_x_encode_empty_list(&reply);
-					}
-				} else if (strcmp(function, "get_class_methods") == 0) {
-					// {call, godot, get_class_methods, [ClassName]}
-					if (args.size() < 1) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						String class_name = args[0].operator String();
-						ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-						if (class_db == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "classdb_unavailable");
-						} else {
-							TypedArray<Dictionary> methods = class_db->class_get_method_list(class_name, true);
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							ei_x_encode_list_header(&reply, methods.size());
-							for (int i = 0; i < methods.size(); i++) {
-								encode_method_info(methods[i], &reply);
-							}
-							ei_x_encode_empty_list(&reply);
-						}
-					}
-				} else if (strcmp(function, "get_class_properties") == 0) {
-					// {call, godot, get_class_properties, [ClassName]}
-					if (args.size() < 1) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						String class_name = args[0].operator String();
-						ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-						if (class_db == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "classdb_unavailable");
-						} else {
-							TypedArray<Dictionary> properties = class_db->class_get_property_list(class_name, true);
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							ei_x_encode_list_header(&reply, properties.size());
-							for (int i = 0; i < properties.size(); i++) {
-								Dictionary prop = properties[i];
-								// Skip NIL properties (grouping/category markers)
-								if (prop["type"].operator int() != Variant::NIL) {
-									encode_property_info(prop, &reply);
-								}
-							}
-							ei_x_encode_empty_list(&reply);
-						}
-					}
-				} else if (strcmp(function, "get_singletons") == 0) {
-					// {call, godot, get_singletons, []}
-					Engine *engine = Engine::get_singleton();
-					if (engine == nullptr) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "engine_unavailable");
-					} else {
-						PackedStringArray singletons = engine->get_singleton_list();
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "reply");
-						ei_x_encode_list_header(&reply, singletons.size());
-						for (int i = 0; i < singletons.size(); i++) {
-							ei_x_encode_string(&reply, singletons[i].utf8().get_data());
-						}
-						ei_x_encode_empty_list(&reply);
-					}
-				} else if (strcmp(function, "get_scene_tree_root") == 0) {
-					// {call, godot, get_scene_tree_root, []}
-					inst = get_current_instance();
-					if (inst == nullptr || inst->scene_tree == nullptr) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "no_scene_tree");
-					} else {
-						Node *root = get_scene_tree_root(inst->scene_tree);
-						if (root == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "no_root");
-						} else {
-							const char *root_name = get_node_name(root);
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							ei_x_encode_tuple_header(&reply, 3);
-							ei_x_encode_atom(&reply, "object");
-							ei_x_encode_string(&reply, root_name ? root_name : "root");
-							ei_x_encode_long(&reply, (int64_t)root->get_instance_id());
-						}
-					}
-				} else if (strcmp(function, "find_node") == 0) {
-					// {call, godot, find_node, [NodePath]}
-					if (args.size() < 1) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "insufficient_args");
-					} else {
-						String path = args[0].operator String();
-						inst = get_current_instance();
-						if (inst == nullptr || inst->scene_tree == nullptr) {
-							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "no_scene_tree");
-						} else {
-							Node *node = find_node_by_path(inst->scene_tree, path.utf8().get_data());
-							if (node == nullptr) {
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "error");
-								ei_x_encode_string(&reply, "node_not_found");
-							} else {
-								const char *node_name = get_node_name(node);
-								ei_x_encode_tuple_header(&reply, 2);
-								ei_x_encode_atom(&reply, "reply");
-								ei_x_encode_tuple_header(&reply, 3);
-								ei_x_encode_atom(&reply, "object");
-								ei_x_encode_string(&reply, node_name ? node_name : "");
-								ei_x_encode_long(&reply, (int64_t)node->get_instance_id());
-							}
-						}
-					}
-				} else {
-					// Unknown function in godot module
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "unknown_function");
-				}
-			} else {
-				// Unknown module
+		// Generic Godot API calls
+		if (strcmp(function, "call_method") == 0) {
+			// {call, godot, call_method, [ObjectID, MethodName, Args]}
+			if (args.size() < 2) {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "unknown_module");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				int64_t object_id = args[0].operator int64_t();
+				String method_name = args[1].operator String();
+
+				// Guard: Check for valid object ID
+				if (object_id == 0) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "invalid_object_id");
+				} else if (method_name.is_empty()) {
+					// Guard: Check method name is not empty
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "empty_method_name");
+				} else {
+					Array method_args;
+					if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+						method_args = args[2].operator Array();
+					}
+
+					Object *obj = get_object_by_id(object_id);
+					if (obj == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "object_not_found");
+					} else {
+						Variant result = obj->callv(method_name, method_args);
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						variant_to_bert(result, &reply);
+					}
+				}
+			}
+		} else if (strcmp(function, "get_property") == 0) {
+			// {call, godot, get_property, [ObjectID, PropertyName]}
+			if (args.size() < 2) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				int64_t object_id = args[0].operator int64_t();
+				String prop_name = args[1].operator String();
+
+				// Guard: Check for valid object ID
+				if (object_id == 0) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "invalid_object_id");
+				} else if (prop_name.is_empty()) {
+					// Guard: Check property name is not empty
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "empty_property_name");
+				} else {
+					Object *obj = get_object_by_id(object_id);
+					if (obj == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "object_not_found");
+					} else {
+						Variant value = obj->get(prop_name);
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						variant_to_bert(value, &reply);
+					}
+				}
+			}
+		} else if (strcmp(function, "set_property") == 0) {
+			// {call, godot, set_property, [ObjectID, PropertyName, Value]}
+			if (args.size() < 3) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				int64_t object_id = args[0].operator int64_t();
+				String prop_name = args[1].operator String();
+				Variant value = args[2];
+
+				// Guard: Check for valid object ID
+				if (object_id == 0) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "invalid_object_id");
+				} else if (prop_name.is_empty()) {
+					// Guard: Check property name is not empty
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "empty_property_name");
+				} else {
+					Object *obj = get_object_by_id(object_id);
+					if (obj == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "object_not_found");
+					} else {
+						obj->set(prop_name, value);
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						ei_x_encode_atom(&reply, "ok");
+					}
+				}
+			}
+		} else if (strcmp(function, "get_singleton") == 0) {
+			// {call, godot, get_singleton, [SingletonName]}
+			if (args.size() < 1) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				String singleton_name = args[0].operator String();
+				Engine *engine = Engine::get_singleton();
+				if (engine == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "engine_unavailable");
+				} else {
+					Object *singleton = engine->get_singleton_object(StringName(singleton_name));
+					if (singleton == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "singleton_not_found");
+					} else {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						ei_x_encode_tuple_header(&reply, 3);
+						ei_x_encode_atom(&reply, "object");
+						ei_x_encode_string(&reply, singleton->get_class().utf8().get_data());
+						ei_x_encode_long(&reply, (int64_t)singleton->get_instance_id());
+					}
+				}
+			}
+		} else if (strcmp(function, "create_object") == 0) {
+			// {call, godot, create_object, [ClassName]}
+			if (args.size() < 1) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				String class_name = args[0].operator String();
+				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+				if (class_db == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "classdb_unavailable");
+				} else {
+					// Use ClassDB to instantiate the class
+					Object *obj = ClassDB::instantiate(StringName(class_name));
+					if (obj == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "class_not_found_or_not_instantiable");
+					} else {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						ei_x_encode_tuple_header(&reply, 3);
+						ei_x_encode_atom(&reply, "object");
+						ei_x_encode_string(&reply, obj->get_class().utf8().get_data());
+						ei_x_encode_long(&reply, (int64_t)obj->get_instance_id());
+					}
+				}
+			}
+		} else if (strcmp(function, "list_classes") == 0) {
+			// {call, godot, list_classes, []}
+			ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+			if (class_db == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "classdb_unavailable");
+			} else {
+				Array classes = class_db->get_class_list();
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_list_header(&reply, classes.size());
+				for (int i = 0; i < classes.size(); i++) {
+					String class_name = classes[i];
+					ei_x_encode_string(&reply, class_name.utf8().get_data());
+				}
+				ei_x_encode_empty_list(&reply);
+			}
+		} else if (strcmp(function, "get_class_methods") == 0) {
+			// {call, godot, get_class_methods, [ClassName]}
+			if (args.size() < 1) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				String class_name = args[0].operator String();
+				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+				if (class_db == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "classdb_unavailable");
+				} else {
+					TypedArray<Dictionary> methods = class_db->class_get_method_list(class_name, true);
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "reply");
+					ei_x_encode_list_header(&reply, methods.size());
+					for (int i = 0; i < methods.size(); i++) {
+						encode_method_info(methods[i], &reply);
+					}
+					ei_x_encode_empty_list(&reply);
+				}
+			}
+		} else if (strcmp(function, "get_class_properties") == 0) {
+			// {call, godot, get_class_properties, [ClassName]}
+			if (args.size() < 1) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				String class_name = args[0].operator String();
+				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+				if (class_db == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "classdb_unavailable");
+				} else {
+					TypedArray<Dictionary> properties = class_db->class_get_property_list(class_name, true);
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "reply");
+					ei_x_encode_list_header(&reply, properties.size());
+					for (int i = 0; i < properties.size(); i++) {
+						Dictionary prop = properties[i];
+						// Skip NIL properties (grouping/category markers)
+						if (prop["type"].operator int() != Variant::NIL) {
+							encode_property_info(prop, &reply);
+						}
+					}
+					ei_x_encode_empty_list(&reply);
+				}
+			}
+		} else if (strcmp(function, "get_singletons") == 0) {
+			// {call, godot, get_singletons, []}
+			Engine *engine = Engine::get_singleton();
+			if (engine == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "engine_unavailable");
+			} else {
+				PackedStringArray singletons = engine->get_singleton_list();
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_list_header(&reply, singletons.size());
+				for (int i = 0; i < singletons.size(); i++) {
+					ei_x_encode_string(&reply, singletons[i].utf8().get_data());
+				}
+				ei_x_encode_empty_list(&reply);
+			}
+		} else if (strcmp(function, "get_scene_tree_root") == 0) {
+			// {call, godot, get_scene_tree_root, []}
+			inst = get_current_instance();
+			if (inst == nullptr || inst->scene_tree == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "no_scene_tree");
+			} else {
+				Node *root = get_scene_tree_root(inst->scene_tree);
+				if (root == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "no_root");
+				} else {
+					const char *root_name = get_node_name(root);
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "reply");
+					ei_x_encode_tuple_header(&reply, 3);
+					ei_x_encode_atom(&reply, "object");
+					ei_x_encode_string(&reply, root_name ? root_name : "root");
+					ei_x_encode_long(&reply, (int64_t)root->get_instance_id());
+				}
+			}
+		} else if (strcmp(function, "find_node") == 0) {
+			// {call, godot, find_node, [NodePath]}
+			if (args.size() < 1) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "insufficient_args");
+			} else {
+				String path = args[0].operator String();
+				inst = get_current_instance();
+				if (inst == nullptr || inst->scene_tree == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "no_scene_tree");
+				} else {
+					Node *node = find_node_by_path(inst->scene_tree, path.utf8().get_data());
+					if (node == nullptr) {
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "error");
+						ei_x_encode_string(&reply, "node_not_found");
+					} else {
+						const char *node_name = get_node_name(node);
+						ei_x_encode_tuple_header(&reply, 2);
+						ei_x_encode_atom(&reply, "reply");
+						ei_x_encode_tuple_header(&reply, 3);
+						ei_x_encode_atom(&reply, "object");
+						ei_x_encode_string(&reply, node_name ? node_name : "");
+						ei_x_encode_long(&reply, (int64_t)node->get_instance_id());
+					}
+				}
+			}
+		} else {
+			// Unknown function in godot module
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "unknown_function");
 		}
 	} else {
-		/* Unknown module */
+		// Unknown module
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "unknown_module");
 	}
+}
+else {
+	/* Unknown module */
+	ei_x_encode_tuple_header(&reply, 2);
+	ei_x_encode_atom(&reply, "error");
+	ei_x_encode_string(&reply, "unknown_module");
+}
 
-	/* Send GenServer-style reply */
-	send_reply(&reply, fd);
-	ei_x_free(&reply);
+/* Send GenServer-style reply */
+send_reply(&reply, fd);
+ei_x_free(&reply);
 
-	return 0;
+return 0;
 }
 
 /*
@@ -911,28 +913,28 @@ static int handle_cast(char *buf, int *index) {
 		UtilityFunctions::printerr("Error: null pointer in handle_cast");
 		return -1;
 	}
-	
+
 	/* Decode Request: {Module, Function, Args} */
 	int request_arity;
 	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
 		UtilityFunctions::printerr("Error: invalid request format in gen_cast");
 		return -1;
 	}
-	
+
 	/* Decode Module and Function from Request tuple */
 	char module[256];
 	char function[256];
-	
+
 	if (ei_decode_atom(buf, index, module) < 0) {
 		UtilityFunctions::printerr("Error decoding module in cast");
 		return -1;
 	}
-	
+
 	if (ei_decode_atom(buf, index, function) < 0) {
 		UtilityFunctions::printerr("Error decoding function in cast");
 		return -1;
 	}
-	
+
 	// Decode arguments (remaining elements in Request tuple)
 	Array args;
 	if (request_arity > 2) {
@@ -941,46 +943,46 @@ static int handle_cast(char *buf, int *index) {
 			args = args_array.operator Array();
 		}
 	}
-	
+
 	// Route based on module (async, no reply)
 	if (strcmp(module, "godot") == 0) {
 		if (strcmp(function, "call_method") == 0) {
-				// {cast, godot, call_method, [ObjectID, MethodName, Args]}
-				if (args.size() >= 2) {
-					int64_t object_id = args[0].operator int64_t();
-					String method_name = args[1].operator String();
-					
-					// Guard: Check for valid object ID and method name
-					if (object_id != 0 && !method_name.is_empty()) {
-						Array method_args;
-						if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
-							method_args = args[2].operator Array();
-						}
-						
-						Object *obj = get_object_by_id(object_id);
-						if (obj != nullptr) {
-							obj->callv(method_name, method_args);
-						}
+			// {cast, godot, call_method, [ObjectID, MethodName, Args]}
+			if (args.size() >= 2) {
+				int64_t object_id = args[0].operator int64_t();
+				String method_name = args[1].operator String();
+
+				// Guard: Check for valid object ID and method name
+				if (object_id != 0 && !method_name.is_empty()) {
+					Array method_args;
+					if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+						method_args = args[2].operator Array();
+					}
+
+					Object *obj = get_object_by_id(object_id);
+					if (obj != nullptr) {
+						obj->callv(method_name, method_args);
 					}
 				}
+			}
 		} else if (strcmp(function, "set_property") == 0) {
-				// {cast, godot, set_property, [ObjectID, PropertyName, Value]}
-				if (args.size() >= 3) {
-					int64_t object_id = args[0].operator int64_t();
-					String prop_name = args[1].operator String();
-					Variant value = args[2];
-					
-					// Guard: Check for valid object ID and property name
-					if (object_id != 0 && !prop_name.is_empty()) {
-						Object *obj = get_object_by_id(object_id);
-						if (obj != nullptr) {
-							obj->set(prop_name, value);
-						}
+			// {cast, godot, set_property, [ObjectID, PropertyName, Value]}
+			if (args.size() >= 3) {
+				int64_t object_id = args[0].operator int64_t();
+				String prop_name = args[1].operator String();
+				Variant value = args[2];
+
+				// Guard: Check for valid object ID and property name
+				if (object_id != 0 && !prop_name.is_empty()) {
+					Object *obj = get_object_by_id(object_id);
+					if (obj != nullptr) {
+						obj->set(prop_name, value);
 					}
+				}
 			}
 		}
 	}
-	
+
 	return 0;
 }
 
@@ -993,13 +995,13 @@ static void send_reply(ei_x_buff *x, int fd) {
 		UtilityFunctions::printerr("Error: null reply buffer in send_reply");
 		return;
 	}
-	
+
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
 		UtilityFunctions::printerr("Error: invalid file descriptor in send_reply");
 		return;
 	}
-	
+
 	/* Send encoded message to the connected node */
 	if (ei_send_encoded(fd, NULL, x->buff, x->index) < 0) {
 		UtilityFunctions::printerr("Error sending reply");
