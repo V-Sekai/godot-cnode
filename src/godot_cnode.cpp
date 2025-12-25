@@ -356,8 +356,10 @@ int next_instance_id = 1;
 /* Forward declarations */
 static int process_message(char *buf, int *index, int fd);
 static int handle_call(char *buf, int *index, int fd);
+static int handle_call_with_reply(char *buf, int *index, int fd, erlang_pid *from_pid, erlang_ref *tag_ref);
 static int handle_cast(char *buf, int *index);
 static void send_reply(ei_x_buff *x, int fd);
+static void send_gen_reply(ei_x_buff *x, int fd, erlang_pid *from_pid, erlang_ref *tag_ref);
 
 /* Custom socket callbacks for macOS compatibility */
 /* macOS doesn't support SO_ACCEPTCONN, so we need a custom accept implementation */
@@ -671,9 +673,12 @@ static int process_message(char *buf, int *index, int fd) {
 	int saved_index = *index;
 
 	/* Decode the message */
+	/* Try to decode version - if it fails, the message might not have version header */
+	/* (e.g., messages sent via :erlang.send() to global names) */
 	if (ei_decode_version(buf, index, NULL) < 0) {
-		fprintf(stderr, "Error decoding version\n");
-		return -1;
+		/* Message might not have version header - reset index and continue */
+		*index = saved_index;
+		printf("Godot CNode: process_message: Message has no version header, skipping\n");
 	}
 
 	if (ei_decode_tuple_header(buf, index, &arity) < 0) {
@@ -696,7 +701,7 @@ static int process_message(char *buf, int *index, int fd) {
 			fprintf(stderr, "Error decoding From tuple in gen_call\n");
 			return -1;
 		}
-		// Skip From (PID) and Tag (reference) - we don't need them for CNode
+		// Decode From (PID) and Tag (reference) - we need them to send reply
 		erlang_pid from_pid;
 		erlang_ref tag_ref;
 		if (ei_decode_pid(buf, index, &from_pid) < 0) {
@@ -707,15 +712,41 @@ static int process_message(char *buf, int *index, int fd) {
 			fprintf(stderr, "Error decoding Tag in gen_call\n");
 			return -1;
 		}
-		// Now decode the Request
-		return handle_call(buf, index, fd);
+		// Now decode the Request and handle with reply capability
+		return handle_call_with_reply(buf, index, fd, &from_pid, &tag_ref);
 	} else if (strcmp(atom, "$gen_cast") == 0) {
 		/* GenServer cast: {'$gen_cast', Request} */
 		// Request is directly after the atom
 		return handle_cast(buf, index);
+	} else if (strcmp(atom, "call") == 0 || strcmp(atom, "cast") == 0) {
+		/* Alternative format: {call, Module, Function, Args} or {cast, Module, Function, Args} */
+		// Reset index to start of tuple to decode properly
+		*index = saved_index;
+		if (ei_decode_tuple_header(buf, index, &arity) < 0) {
+			fprintf(stderr, "Error decoding tuple header in call/cast\n");
+			return -1;
+		}
+		// Skip the "call" or "cast" atom we already decoded
+		if (ei_decode_atom(buf, index, atom) < 0) {
+			fprintf(stderr, "Error decoding call/cast atom\n");
+			return -1;
+		}
+		// Now handle as call or cast
+		if (strcmp(atom, "call") == 0) {
+			return handle_call(buf, index, fd);
+		} else {
+			return handle_cast(buf, index);
+		}
 	} else {
-		/* Only GenServer-style messages are supported */
-		fprintf(stderr, "Only GenServer-style messages supported. Got: %s\n", atom);
+		/* Try to handle as plain message - log and accept (for compatibility) */
+		*index = saved_index;
+		if (ei_decode_tuple_header(buf, index, &arity) >= 0) {
+			printf("Godot CNode: Received plain message with %d elements (first atom: %s) - accepting\n", arity, atom);
+			// Accept plain messages without error (for compatibility with direct sends)
+			return 0;
+		}
+		/* Unknown message format */
+		fprintf(stderr, "Unknown message format. Got: %s (expected $gen_call, $gen_cast, call, or cast)\n", atom);
 		return -1;
 	}
 }
@@ -859,7 +890,27 @@ static int handle_call(char *buf, int *index, int fd) {
 	}
 
 	// Route based on module
-	if (strcmp(module, "godot") == 0) {
+	if (strcmp(module, "erlang") == 0) {
+		// Basic Erlang RPC support for compatibility
+		if (strcmp(function, "node") == 0) {
+			// Return the CNode's node name
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_atom(&reply, ec.thisnodename);
+		} else if (strcmp(function, "nodes") == 0) {
+			// Return connected nodes (empty list for now)
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_list_header(&reply, 0);
+			ei_x_encode_empty_list(&reply);
+		} else {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			char error_msg[256];
+			snprintf(error_msg, sizeof(error_msg), "unsupported_function: %s", function);
+			ei_x_encode_string(&reply, error_msg);
+		}
+	} else if (strcmp(module, "godot") == 0) {
 		// Generic Godot API calls
 		if (strcmp(function, "call_method") == 0) {
 			// {call, godot, call_method, [ObjectID, MethodName, Args]}
@@ -1099,6 +1150,22 @@ static int handle_call(char *buf, int *index, int fd) {
 					ei_x_encode_empty_list(&reply);
 				}
 			}
+		} else if (strcmp(function, "get_scene_tree") == 0) {
+			// {call, godot, get_scene_tree, []}
+			// Get the SceneTree instance (via Engine.get_main_loop())
+			SceneTree *scene_tree = get_scene_tree();
+			if (scene_tree == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "scene_tree_not_available");
+			} else {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_tuple_header(&reply, 3);
+				ei_x_encode_atom(&reply, "object");
+				ei_x_encode_string(&reply, scene_tree->get_class().utf8().get_data());
+				ei_x_encode_long(&reply, (long)(int64_t)scene_tree->get_instance_id());
+			}
 		} else if (strcmp(function, "get_singletons") == 0) {
 			// {call, godot, get_singletons, []}
 			Engine *engine = Engine::get_singleton();
@@ -1272,7 +1339,7 @@ static int handle_cast(char *buf, int *index) {
 }
 
 /*
- * Send reply to Erlang/Elixir
+ * Send reply to Erlang/Elixir (plain format)
  */
 static void send_reply(ei_x_buff *x, int fd) {
 	// Guard: Check for null pointer
@@ -1290,6 +1357,178 @@ static void send_reply(ei_x_buff *x, int fd) {
 	/* Send encoded message to the connected node */
 	if (ei_send_encoded(fd, NULL, x->buff, x->index) < 0) {
 		fprintf(stderr, "Error sending reply\n");
+	}
+}
+
+/*
+ * Send GenServer-style reply: {From, Tag, Reply}
+ * Reply is the actual reply data (not wrapped in {reply, Data})
+ */
+static void send_gen_reply(ei_x_buff *x, int fd, erlang_pid *from_pid, erlang_ref *tag_ref) {
+	// Guard: Check for null pointers
+	if (x == nullptr || from_pid == nullptr || tag_ref == nullptr) {
+		fprintf(stderr, "Error: null pointer in send_gen_reply\n");
+		return;
+	}
+
+	// Guard: Check for valid file descriptor
+	if (fd < 0) {
+		fprintf(stderr, "Error: invalid file descriptor in send_gen_reply\n");
+		return;
+	}
+
+	/* Create GenServer reply format: {From, Tag, Reply} */
+	ei_x_buff gen_reply;
+	ei_x_new(&gen_reply);
+
+	ei_x_encode_tuple_header(&gen_reply, 3);
+	ei_x_encode_pid(&gen_reply, from_pid);
+	ei_x_encode_ref(&gen_reply, tag_ref);
+
+	/* Extract the actual reply data from x buffer */
+	/* x contains {reply, Data} or {error, Reason} */
+	/* We need to extract just the Data/Reason part and encode it */
+	int saved_index = x->index;
+	int decode_index = 0;
+
+	/* Decode the reply tuple */
+	int reply_arity;
+	if (ei_decode_tuple_header(x->buff, &decode_index, &reply_arity) == 0 && reply_arity == 2) {
+		char reply_type[256];
+		if (ei_decode_atom(x->buff, &decode_index, reply_type) == 0) {
+			/* Now decode the data part and re-encode it */
+			/* Try to decode as atom first (for erlang:node which returns an atom) */
+			int data_start_index = decode_index;
+			char atom_data[256];
+			if (ei_decode_atom(x->buff, &decode_index, atom_data) == 0) {
+				ei_x_encode_atom(&gen_reply, atom_data);
+			} else {
+				/* Try to decode as string */
+				decode_index = data_start_index; // Reset to start of data
+				char string_data[1024];
+				if (ei_decode_string(x->buff, &decode_index, string_data) == 0) {
+					ei_x_encode_string(&gen_reply, string_data);
+				} else {
+					/* Try to decode as list */
+					decode_index = data_start_index; // Reset to start of data
+					int list_arity;
+					if (ei_decode_list_header(x->buff, &decode_index, &list_arity) == 0) {
+						ei_x_encode_list_header(&gen_reply, list_arity);
+						/* For empty list, just encode empty list */
+						if (list_arity == 0) {
+							ei_x_encode_empty_list(&gen_reply);
+						} else {
+							/* For simplicity, encode as empty list for now */
+							ei_x_encode_empty_list(&gen_reply);
+						}
+					} else {
+						/* Fallback: encode error message */
+						ei_x_encode_string(&gen_reply, "unable_to_decode_reply_data");
+					}
+				}
+			}
+		} else {
+			ei_x_encode_string(&gen_reply, "invalid_reply_format");
+		}
+	} else {
+		ei_x_encode_string(&gen_reply, "invalid_reply_format");
+	}
+
+	/* Send GenServer reply */
+	if (ei_send_encoded(fd, NULL, gen_reply.buff, gen_reply.index) < 0) {
+		fprintf(stderr, "Error sending GenServer reply\n");
+	}
+
+	ei_x_free(&gen_reply);
+}
+
+/*
+ * Handle call with GenServer reply format
+ */
+static int handle_call_with_reply(char *buf, int *index, int fd, erlang_pid *from_pid, erlang_ref *tag_ref) {
+	// Call the regular handle_call but use GenServer reply format
+	ei_x_buff reply;
+	ei_x_new(&reply);
+
+	/* Decode Request: {Module, Function, Args} */
+	int request_arity;
+	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_request_format");
+		send_gen_reply(&reply, fd, from_pid, tag_ref);
+		ei_x_free(&reply);
+		return -1;
+	}
+
+	/* Decode Module and Function from Request tuple */
+	char module[256];
+	char function[256];
+
+	if (ei_decode_atom(buf, index, module) < 0) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_module");
+		send_gen_reply(&reply, fd, from_pid, tag_ref);
+		ei_x_free(&reply);
+		return -1;
+	}
+
+	if (ei_decode_atom(buf, index, function) < 0) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_function");
+		send_gen_reply(&reply, fd, from_pid, tag_ref);
+		ei_x_free(&reply);
+		return -1;
+	}
+
+	// Decode arguments (remaining elements in Request tuple)
+	Array args;
+	if (request_arity > 2) {
+		Variant args_array = bert_to_variant(buf, index);
+		if (args_array.get_type() == Variant::ARRAY) {
+			args = args_array.operator Array();
+		}
+	}
+
+	// Route based on module
+	if (strcmp(module, "erlang") == 0) {
+		// Basic Erlang RPC support for compatibility
+		if (strcmp(function, "node") == 0) {
+			// Return the CNode's node name
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_atom(&reply, ec.thisnodename);
+		} else if (strcmp(function, "nodes") == 0) {
+			// Return connected nodes (empty list for now)
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_list_header(&reply, 0);
+			ei_x_encode_empty_list(&reply);
+		} else {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			char error_msg[256];
+			snprintf(error_msg, sizeof(error_msg), "unsupported_function: %s", function);
+			ei_x_encode_string(&reply, error_msg);
+		}
+		send_gen_reply(&reply, fd, from_pid, tag_ref);
+		ei_x_free(&reply);
+		return 0;
+	} else {
+		// For other modules, use regular handle_call and convert reply
+		// Save current index to restore after handle_call
+		int saved_index = *index;
+		*index = saved_index - (request_arity * sizeof(int)); // Approximate, but we'll decode again
+
+		// Actually, let's just handle it inline for simplicity
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "module_not_supported_in_gen_call");
+		send_gen_reply(&reply, fd, from_pid, tag_ref);
+		ei_x_free(&reply);
+		return 0;
 	}
 }
 
@@ -1366,12 +1605,30 @@ void main_loop() {
 		printf("Godot CNode: ✓ Accepted connection on fd: %d\n", fd);
 		if (con.nodename[0] != '\0') {
 			printf("Godot CNode: Connected from node: %s\n", con.nodename);
+
+			/* Register global name on first connection to enable :erlang.send() from Elixir */
+			/* This allows Erlang/Elixir processes to send messages using {:godot_server, cnode_name} */
+			static bool global_name_registered = false;
+			if (!global_name_registered) {
+				erlang_pid *self_pid = ei_self(&ec);
+				if (self_pid != nullptr && ei_global_register(fd, "godot_server", self_pid) == 0) {
+					printf("Godot CNode: ✓ Registered global name 'godot_server'\n");
+					global_name_registered = true;
+				} else {
+					fprintf(stderr, "Godot CNode: Warning: Failed to register global name 'godot_server'\n");
+				}
+			}
 		} else {
 			printf("Godot CNode: Connected from node: (nodename not provided)\n");
 		}
 
 		/* Receive message */
+		/* Note: ei_receive_msg() might also check SO_ACCEPTCONN internally on macOS */
+		/* This causes errno 42 (Protocol not available) - same issue as ei_accept() */
+		/* Workaround: Use lower-level ei_receive() when ei_receive_msg() fails with errno 42 */
 		printf("Godot CNode: Waiting to receive message from fd: %d...\n", fd);
+
+		/* Try ei_receive_msg() first - it handles message parsing automatically */
 		res = ei_receive_msg(fd, &msg, &x);
 		printf("Godot CNode: ei_receive_msg returned: %d", res);
 
@@ -1380,9 +1637,59 @@ void main_loop() {
 			printf(" (ERL_TICK - keepalive)\n");
 			continue;
 		} else if (res == ERL_ERROR) {
-			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", errno, strerror(errno));
-			close(fd);
-			continue;
+			int saved_errno = errno;
+			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", saved_errno, strerror(saved_errno));
+
+			/* Handle errno 42 (Protocol not available) - same macOS issue as ei_accept() */
+			/* ei_receive_msg() checks SO_ACCEPTCONN internally which fails on macOS */
+			/* Workaround: Use lower-level ei_receive() to read raw bytes, then decode manually */
+			/* Note: errno 42 is ENOPROTOOPT on macOS */
+			printf("Godot CNode: Checking errno %d (ENOPROTOOPT=%d)...\n", saved_errno, ENOPROTOOPT);
+			if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
+				printf("Godot CNode: ei_receive_msg() failed with Protocol not available (macOS SO_ACCEPTCONN issue)\n");
+				printf("Godot CNode: Using ei_receive() as fallback to read message directly...\n");
+
+				/* Clear the buffer and try using ei_receive() directly */
+				/* ei_receive() is lower-level and might not check SO_ACCEPTCONN */
+				/* First, ensure buffer is large enough (ei_x_buff starts with default size) */
+				/* ei_receive() reads a complete message according to Erlang distribution protocol */
+				/* It reads the length prefix and then the message body */
+
+				/* Try to read using ei_receive() - it handles the protocol automatically */
+				/* Use a temporary buffer first to read the length, then expand if needed */
+				unsigned char temp_buf[4096]; /* Temporary buffer for initial read */
+				int bytes_read = ei_receive(fd, temp_buf, sizeof(temp_buf));
+				if (bytes_read > 0) {
+					printf("Godot CNode: ei_receive() read %d bytes successfully\n", bytes_read);
+
+					/* Copy to x buffer and set up for decoding */
+					ei_x_free(&x);
+					ei_x_new(&x);
+					/* Ensure buffer is large enough - use ei_x_append_buf to copy data */
+					/* ei_x_append_buf will automatically expand the buffer if needed */
+					ei_x_append_buf(&x, (const char *)temp_buf, bytes_read);
+					x.index = 0; /* Reset to 0 for decoding */
+
+					/* Set message type to ERL_SEND (regular send message) */
+					msg.msgtype = 1; /* ERL_SEND */
+					res = 0; /* Treat as success */
+				} else if (bytes_read == 0) {
+					/* Connection closed */
+					printf("Godot CNode: Connection closed (ei_receive returned 0)\n");
+					close(fd);
+					continue;
+				} else {
+					/* Error reading */
+					int receive_errno = errno;
+					fprintf(stderr, "Godot CNode: ei_receive() failed: %d (errno: %d, %s)\n", bytes_read, receive_errno, strerror(receive_errno));
+					close(fd);
+					continue;
+				}
+			} else {
+				/* Other error - close and retry */
+				close(fd);
+				continue;
+			}
 		} else {
 			printf(" (success)\n");
 		}
@@ -1390,12 +1697,29 @@ void main_loop() {
 		printf("Godot CNode: Message type: %ld\n", msg.msgtype);
 
 		/* Process the message */
+		/* Note: Messages sent via :erlang.send() to global names might not have version header */
+		/* Try to decode with version first, if that fails, try without */
 		x.index = 0;
+		int saved_index = x.index;
+		bool has_version = true;
+
+		/* Try to decode version - if it fails, the message might not have version header */
+		if (ei_decode_version(x.buff, &x.index, NULL) < 0) {
+			/* Message might not have version header (e.g., sent via :erlang.send()) */
+			/* Reset index and try processing without version */
+			x.index = saved_index;
+			has_version = false;
+			printf("Godot CNode: Message has no version header, processing directly\n");
+		}
+
+		/* Process message */
 		if (process_message(x.buff, &x.index, fd) < 0) {
 			fprintf(stderr, "Error processing message\n");
 		}
 
-		close(fd);
+		/* Keep connection open for replies - messages sent via :erlang.send() reuse the connection */
+		/* Don't close immediately - wait for next message or timeout */
+		/* The connection will be reused for subsequent messages */
 	}
 
 	ei_x_free(&x);

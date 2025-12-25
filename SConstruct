@@ -198,4 +198,26 @@ else:
         source=sources,
     )
 
+# Build unit test executable (optional, only if test source exists)
+if os.path.exists("test/test_cnode_unit.cpp"):
+    test_env = env.Clone()
+    test_env.Append(CPPDEFINES=["UNIT_TEST"])
+
+    # Unit test doesn't need Godot API, just erl_interface
+    test_sources = ["test/test_cnode_unit.cpp"]
+
+    # Build test executable
+    if test_env["platform"] == "macos" or test_env["platform"] == "linux":
+        test_program = test_env.Program(
+            "bin/test_cnode_unit",
+            test_sources,
+        )
+    elif test_env["platform"] == "windows":
+        test_program = test_env.Program(
+            "bin/test_cnode_unit.exe",
+            test_sources,
+        )
+    else:
+        test_program = None
+
 Default(library)
