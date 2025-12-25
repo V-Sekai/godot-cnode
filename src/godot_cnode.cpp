@@ -364,6 +364,18 @@ int init_cnode(char *nodename, char *cookie) {
  * and direct RPC calls from :rpc.call
  */
 static int process_message(char *buf, int *index, int fd) {
+	// Guard: Check for null pointers
+	if (buf == nullptr || index == nullptr) {
+		UtilityFunctions::printerr("Error: null pointer in process_message");
+		return -1;
+	}
+	
+	// Guard: Check for valid file descriptor
+	if (fd < 0) {
+		UtilityFunctions::printerr("Error: invalid file descriptor in process_message");
+		return -1;
+	}
+	
 	int arity;
 	char atom[MAXATOMLEN];
 	int saved_index = *index;
@@ -476,6 +488,18 @@ static void encode_property_info(const Dictionary &property, ei_x_buff *x) {
  * Handle synchronous call from Erlang/Elixir
  */
 static int handle_call(char *buf, int *index, int fd) {
+	// Guard: Check for null pointers
+	if (buf == nullptr || index == nullptr) {
+		UtilityFunctions::printerr("Error: null pointer in handle_call");
+		return -1;
+	}
+	
+	// Guard: Check for valid file descriptor
+	if (fd < 0) {
+		UtilityFunctions::printerr("Error: invalid file descriptor in handle_call");
+		return -1;
+	}
+	
 	char atom[MAXATOMLEN];
 	ei_x_buff reply;
 	long instance_id;
@@ -525,21 +549,34 @@ static int handle_call(char *buf, int *index, int fd) {
 					} else {
 						int64_t object_id = args[0].operator int64_t();
 						String method_name = args[1].operator String();
-						Array method_args;
-						if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
-							method_args = args[2].operator Array();
-						}
 						
-						Object *obj = get_object_by_id(object_id);
-						if (obj == nullptr) {
+						// Guard: Check for valid object ID
+						if (object_id == 0) {
 							ei_x_encode_tuple_header(&reply, 2);
 							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "object_not_found");
-						} else {
-							Variant result = obj->callv(method_name, method_args);
+							ei_x_encode_string(&reply, "invalid_object_id");
+						} else if (method_name.is_empty()) {
+							// Guard: Check method name is not empty
 							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							variant_to_bert(result, &reply);
+							ei_x_encode_atom(&reply, "error");
+							ei_x_encode_string(&reply, "empty_method_name");
+						} else {
+							Array method_args;
+							if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+								method_args = args[2].operator Array();
+							}
+							
+							Object *obj = get_object_by_id(object_id);
+							if (obj == nullptr) {
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "error");
+								ei_x_encode_string(&reply, "object_not_found");
+							} else {
+								Variant result = obj->callv(method_name, method_args);
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "reply");
+								variant_to_bert(result, &reply);
+							}
 						}
 					}
 				} else if (strcmp(function, "get_property") == 0) {
@@ -552,16 +589,28 @@ static int handle_call(char *buf, int *index, int fd) {
 						int64_t object_id = args[0].operator int64_t();
 						String prop_name = args[1].operator String();
 						
-						Object *obj = get_object_by_id(object_id);
-						if (obj == nullptr) {
+						// Guard: Check for valid object ID
+						if (object_id == 0) {
 							ei_x_encode_tuple_header(&reply, 2);
 							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "object_not_found");
-						} else {
-							Variant value = obj->get(prop_name);
+							ei_x_encode_string(&reply, "invalid_object_id");
+						} else if (prop_name.is_empty()) {
+							// Guard: Check property name is not empty
 							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							variant_to_bert(value, &reply);
+							ei_x_encode_atom(&reply, "error");
+							ei_x_encode_string(&reply, "empty_property_name");
+						} else {
+							Object *obj = get_object_by_id(object_id);
+							if (obj == nullptr) {
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "error");
+								ei_x_encode_string(&reply, "object_not_found");
+							} else {
+								Variant value = obj->get(prop_name);
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "reply");
+								variant_to_bert(value, &reply);
+							}
 						}
 					}
 				} else if (strcmp(function, "set_property") == 0) {
@@ -575,16 +624,28 @@ static int handle_call(char *buf, int *index, int fd) {
 						String prop_name = args[1].operator String();
 						Variant value = args[2];
 						
-						Object *obj = get_object_by_id(object_id);
-						if (obj == nullptr) {
+						// Guard: Check for valid object ID
+						if (object_id == 0) {
 							ei_x_encode_tuple_header(&reply, 2);
 							ei_x_encode_atom(&reply, "error");
-							ei_x_encode_string(&reply, "object_not_found");
-						} else {
-							obj->set(prop_name, value);
+							ei_x_encode_string(&reply, "invalid_object_id");
+						} else if (prop_name.is_empty()) {
+							// Guard: Check property name is not empty
 							ei_x_encode_tuple_header(&reply, 2);
-							ei_x_encode_atom(&reply, "reply");
-							ei_x_encode_atom(&reply, "ok");
+							ei_x_encode_atom(&reply, "error");
+							ei_x_encode_string(&reply, "empty_property_name");
+						} else {
+							Object *obj = get_object_by_id(object_id);
+							if (obj == nullptr) {
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "error");
+								ei_x_encode_string(&reply, "object_not_found");
+							} else {
+								obj->set(prop_name, value);
+								ei_x_encode_tuple_header(&reply, 2);
+								ei_x_encode_atom(&reply, "reply");
+								ei_x_encode_atom(&reply, "ok");
+							}
 						}
 					}
 				} else if (strcmp(function, "get_singleton") == 0) {
@@ -817,6 +878,12 @@ static int handle_call(char *buf, int *index, int fd) {
  * Handle asynchronous cast from Erlang/Elixir (GenServer-like cast)
  */
 static int handle_cast(char *buf, int *index) {
+	// Guard: Check for null pointers
+	if (buf == nullptr || index == nullptr) {
+		UtilityFunctions::printerr("Error: null pointer in handle_cast");
+		return -1;
+	}
+	
 	char atom[MAXATOMLEN];
 	
 	/* Get the function name */
@@ -861,14 +928,18 @@ static int handle_cast(char *buf, int *index) {
 				if (args.size() >= 2) {
 					int64_t object_id = args[0].operator int64_t();
 					String method_name = args[1].operator String();
-					Array method_args;
-					if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
-						method_args = args[2].operator Array();
-					}
 					
-					Object *obj = get_object_by_id(object_id);
-					if (obj != nullptr) {
-						obj->callv(method_name, method_args);
+					// Guard: Check for valid object ID and method name
+					if (object_id != 0 && !method_name.is_empty()) {
+						Array method_args;
+						if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+							method_args = args[2].operator Array();
+						}
+						
+						Object *obj = get_object_by_id(object_id);
+						if (obj != nullptr) {
+							obj->callv(method_name, method_args);
+						}
 					}
 				}
 			} else if (strcmp(function, "set_property") == 0) {
@@ -878,9 +949,12 @@ static int handle_cast(char *buf, int *index) {
 					String prop_name = args[1].operator String();
 					Variant value = args[2];
 					
-					Object *obj = get_object_by_id(object_id);
-					if (obj != nullptr) {
-						obj->set(prop_name, value);
+					// Guard: Check for valid object ID and property name
+					if (object_id != 0 && !prop_name.is_empty()) {
+						Object *obj = get_object_by_id(object_id);
+						if (obj != nullptr) {
+							obj->set(prop_name, value);
+						}
 					}
 				}
 			}
@@ -894,6 +968,18 @@ static int handle_cast(char *buf, int *index) {
  * Send reply to Erlang/Elixir
  */
 static void send_reply(ei_x_buff *x, int fd) {
+	// Guard: Check for null pointer
+	if (x == nullptr) {
+		UtilityFunctions::printerr("Error: null reply buffer in send_reply");
+		return;
+	}
+	
+	// Guard: Check for valid file descriptor
+	if (fd < 0) {
+		UtilityFunctions::printerr("Error: invalid file descriptor in send_reply");
+		return;
+	}
+	
 	/* Send encoded message to the connected node */
 	if (ei_send_encoded(fd, NULL, x->buff, x->index) < 0) {
 		UtilityFunctions::printerr("Error sending reply");
