@@ -8,6 +8,7 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/core/memory.hpp>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -38,11 +39,21 @@ static String generate_cryptorandom_string(int length = 32) {
 	const int charset_size = sizeof(charset) - 1; // -1 to exclude null terminator
 	
 	// Use Godot's Crypto class to generate random bytes
-	Ref<Crypto> crypto = Crypto::create();
-	if (crypto.is_null()) {
+	// Crypto is RefCounted, so we use ClassDB::instantiate and cast to Ref<Crypto>
+	Object *crypto_obj = ClassDB::instantiate("Crypto");
+	if (crypto_obj == nullptr) {
 		UtilityFunctions::printerr("Godot CNode: Failed to create Crypto instance");
 		return "godotcookie"; // Fallback
 	}
+	
+	Ref<Crypto> crypto = Object::cast_to<Crypto>(crypto_obj);
+	if (crypto.is_null()) {
+		UtilityFunctions::printerr("Godot CNode: Failed to cast to Crypto");
+		// If cast fails, we need to delete the object manually
+		memdelete(crypto_obj);
+		return "godotcookie"; // Fallback
+	}
+	// Ref<> now owns the object, no need to delete manually
 	
 	// Generate random bytes
 	PackedByteArray random_bytes = crypto->generate_random_bytes(length);
@@ -53,7 +64,6 @@ static String generate_cryptorandom_string(int length = 32) {
 	
 	// Convert random bytes to string using charset
 	String result;
-	result.reserve(length);
 	for (int i = 0; i < length; i++) {
 		uint8_t byte = random_bytes[i];
 		result += charset[byte % charset_size];
@@ -209,3 +219,4 @@ GDExtensionBool GDE_EXPORT godot_cnode_library_init(
 	return init_obj.init();
 }
 }
+
