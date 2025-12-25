@@ -125,15 +125,18 @@ static Node *get_node_by_id(int64_t node_id) {
 }
 
 /* Convert BERT to Variant (decode from ei buffer) */
-static Variant bert_to_variant(char *buf, int *index) {
+/* skip_version: if true, skip version decoding (used when already inside a tuple/list) */
+static Variant bert_to_variant(char *buf, int *index, bool skip_version = false) {
 	int type, arity;
 	char atom[MAXATOMLEN];
 	long long_val;
 	double double_val;
 	char string_buf[256];
 
-	if (ei_decode_version(buf, index, NULL) < 0) {
-		return Variant(); // Error
+	if (!skip_version) {
+		if (ei_decode_version(buf, index, NULL) < 0) {
+			return Variant(); // Error
+		}
 	}
 
 	if (ei_get_type(buf, index, &type, &arity) < 0) {
@@ -173,19 +176,26 @@ static Variant bert_to_variant(char *buf, int *index) {
 			break;
 
 		case ERL_LIST_EXT:
+			// Decode list header to get actual arity
+			if (ei_decode_list_header(buf, index, &arity) < 0) {
+				return Variant(); // Error
+			}
 			if (arity == 0) {
-				ei_decode_list_header(buf, index, &arity);
+				// Empty list - check for tail (should be nil)
+				int tail_type, tail_size;
+				if (ei_get_type(buf, index, &tail_type, &tail_size) == 0 && tail_type == ERL_NIL_EXT) {
+					ei_skip_term(buf, index);
+				}
 				return Variant(Array());
 			} else {
 				Array arr;
-				ei_decode_list_header(buf, index, &arity);
 				for (int i = 0; i < arity; i++) {
-					Variant elem = bert_to_variant(buf, index);
+					Variant elem = bert_to_variant(buf, index, true); // Skip version, already in list
 					arr.push_back(elem);
 				}
 				// Check and skip the list tail (should be nil/empty list)
-				int type, size;
-				if (ei_get_type(buf, index, &type, &size) == 0 && type == ERL_NIL_EXT) {
+				int tail_type, tail_size;
+				if (ei_get_type(buf, index, &tail_type, &tail_size) == 0 && tail_type == ERL_NIL_EXT) {
 					ei_skip_term(buf, index);
 				}
 				return Variant(arr);
@@ -218,8 +228,8 @@ static Variant bert_to_variant(char *buf, int *index) {
 						long dict_size;
 						ei_decode_long(buf, index, &dict_size);
 						for (long i = 0; i < dict_size; i++) {
-							Variant key = bert_to_variant(buf, index);
-							Variant value = bert_to_variant(buf, index);
+							Variant key = bert_to_variant(buf, index, true); // Skip version, already in tuple
+							Variant value = bert_to_variant(buf, index, true); // Skip version, already in tuple
 							dict[key] = value;
 						}
 						return Variant(dict);
@@ -229,7 +239,9 @@ static Variant bert_to_variant(char *buf, int *index) {
 			break;
 
 		case ERL_NIL_EXT:
-			return Variant();
+			// Empty list [] can be encoded as ERL_NIL_EXT
+			ei_skip_term(buf, index);
+			return Variant(); // Return NIL - caller should handle conversion to empty array if needed
 	}
 
 	return Variant(); // Error or unsupported type
@@ -878,7 +890,8 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	// Decode arguments (remaining elements in Request tuple)
 	Array args;
 	if (request_arity > 2) {
-		Variant args_array = bert_to_variant(buf, index);
+		// Skip version - we're already inside a tuple, version was decoded at message level
+		Variant args_array = bert_to_variant(buf, index, true);
 		if (args_array.get_type() == Variant::ARRAY) {
 			args = args_array.operator Array();
 		}
@@ -1201,12 +1214,30 @@ static int handle_cast(char *buf, int *index) {
 	}
 
 	// Decode arguments (remaining elements in Request tuple)
+	// For plain messages, args is the third element: {Module, Function, Args}
+	// For GenServer casts, args is directly after $gen_cast: {'$gen_cast', {Module, Function, Args}}
 	Array args;
 	if (request_arity > 2) {
-		Variant args_array = bert_to_variant(buf, index);
+		// Skip version - we're already inside a tuple, version was decoded at message level
+		Variant args_array = bert_to_variant(buf, index, true);
 		if (args_array.get_type() == Variant::ARRAY) {
 			args = args_array.operator Array();
+			printf("Godot CNode: handle_cast - Decoded args array with %d elements\n", args.size());
+			fflush(stdout);
+		} else if (args_array.get_type() == Variant::NIL) {
+			// Empty list [] decodes as NIL (ERL_NIL_EXT), treat as empty array
+			args = Array();
+			printf("Godot CNode: handle_cast - Empty args list (treating as empty array)\n");
+			fflush(stdout);
+		} else {
+			printf("Godot CNode: handle_cast - Args is not an array (type: %d)\n", args_array.get_type());
+			fflush(stdout);
 		}
+	} else {
+		// No args provided
+		args = Array();
+		printf("Godot CNode: handle_cast - No args (request_arity: %d)\n", request_arity);
+		fflush(stdout);
 	}
 
 	// Route based on module (async, no reply)
