@@ -28,8 +28,8 @@
 #include <unistd.h>
 #else
 // Windows equivalents
-#include <windows.h>
 #include <io.h>
+#include <windows.h>
 #define close _close
 #endif
 
