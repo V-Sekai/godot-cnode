@@ -47,19 +47,44 @@ The CNode runs in a background thread and communicates with the current Godot in
 - Find nodes by path
 - Get/set node properties
 - Call node methods
+- Discover Godot's API dynamically using ClassDB
+- Access singletons
+- Work with any Object (not just Nodes)
 - Convert between Godot Variants and Erlang BERT format
+
+The API discovery system is inspired by the godot-sandbox project's runtime API generation, but adapted for Erlang/Elixir communication over CNode instead of sandboxed programs.
 
 ## API
 
-### Available RPC Calls
+### Basic RPC Calls
 
 - `ping` - Returns "pong" for connectivity testing
 - `godot_version` - Returns Godot version string
+
+### Scene Tree & Node Operations
+
 - `get_scene_tree_root` - Returns the root node of the scene tree
 - `find_node` - Finds a node by path string
 - `get_node_property` - Gets a property value from a node
 - `set_node_property` - Sets a property value on a node
 - `call_node_method` - Calls a method on a node with arguments
+
+### ClassDB API Discovery
+
+- `list_classes` - Returns a list of all registered Godot classes
+- `get_class_methods` - Returns methods for a given class name
+- `get_class_properties` - Returns properties for a given class name
+
+### Singleton Access
+
+- `get_singletons` - Returns a list of all singleton names
+- `get_singleton` - Gets a singleton object by name
+
+### Generic Object Operations
+
+- `call_object_method` - Calls a method on any Object (not just Node) by instance ID
+- `get_object_property` - Gets a property from any Object by instance ID
+- `set_object_property` - Sets a property on any Object by instance ID
 
 ## License
 

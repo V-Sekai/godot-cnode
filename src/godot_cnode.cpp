@@ -27,10 +27,12 @@ extern "C" {
 }
 
 // Godot-cpp includes
+#include <godot_cpp/classes/class_db_singleton.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/main_loop.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -426,6 +428,44 @@ static godot_instance_t *get_current_instance() {
 	return nullptr;
 }
 
+/* Helper: Get object by instance ID (generic, not just Node) */
+static Object *get_object_by_id(int64_t object_id) {
+	if (object_id == 0) return nullptr;
+	ObjectID obj_id = ObjectID((uint64_t)object_id);
+	Object *obj = ObjectDB::get_instance(obj_id);
+	return obj;
+}
+
+/* Helper: Encode method info to BERT */
+static void encode_method_info(const Dictionary &method, ei_x_buff *x) {
+	ei_x_encode_tuple_header(x, 4);
+	ei_x_encode_string(x, method["name"].operator String().utf8().get_data());
+	
+	Dictionary return_val = method["return"];
+	int return_type = return_val["type"];
+	ei_x_encode_long(x, return_type);
+	
+	Array args = method["args"];
+	ei_x_encode_list_header(x, args.size());
+	for (int i = 0; i < args.size(); i++) {
+		Dictionary arg = args[i];
+		ei_x_encode_tuple_header(x, 2);
+		ei_x_encode_string(x, arg["name"].operator String().utf8().get_data());
+		ei_x_encode_long(x, arg["type"]);
+	}
+	ei_x_encode_empty_list(x);
+	
+	ei_x_encode_long(x, method["flags"]);
+}
+
+/* Helper: Encode property info to BERT */
+static void encode_property_info(const Dictionary &property, ei_x_buff *x) {
+	ei_x_encode_tuple_header(x, 3);
+	ei_x_encode_string(x, property["name"].operator String().utf8().get_data());
+	ei_x_encode_long(x, property["type"]);
+	ei_x_encode_string(x, property.get("class_name", "").operator String().utf8().get_data());
+}
+
 /*
  * Handle synchronous call from Erlang/Elixir
  */
@@ -576,6 +616,196 @@ static int handle_call(char *buf, int *index, int fd) {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "reply");
 				variant_to_bert(result, &reply);
+			}
+		}
+	} else if (strcmp(atom, "list_classes") == 0) {
+		/* List all registered classes */
+		ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+		if (class_db == nullptr) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "classdb_unavailable");
+		} else {
+			Array classes = class_db->get_class_list();
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_list_header(&reply, classes.size());
+			for (int i = 0; i < classes.size(); i++) {
+				String class_name = classes[i];
+				ei_x_encode_string(&reply, class_name.utf8().get_data());
+			}
+			ei_x_encode_empty_list(&reply);
+		}
+	} else if (strcmp(atom, "get_class_methods") == 0) {
+		/* Get methods for a class */
+		char class_name[256];
+		if (ei_decode_string(buf, index, class_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_class_name");
+		} else {
+			ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+			if (class_db == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "classdb_unavailable");
+			} else {
+				TypedArray<Dictionary> methods = class_db->class_get_method_list(String::utf8(class_name), true);
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_list_header(&reply, methods.size());
+				for (int i = 0; i < methods.size(); i++) {
+					encode_method_info(methods[i], &reply);
+				}
+				ei_x_encode_empty_list(&reply);
+			}
+		}
+	} else if (strcmp(atom, "get_class_properties") == 0) {
+		/* Get properties for a class */
+		char class_name[256];
+		if (ei_decode_string(buf, index, class_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_class_name");
+		} else {
+			ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
+			if (class_db == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "classdb_unavailable");
+			} else {
+				TypedArray<Dictionary> properties = class_db->class_get_property_list(String::utf8(class_name), true);
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_list_header(&reply, properties.size());
+				for (int i = 0; i < properties.size(); i++) {
+					Dictionary prop = properties[i];
+					// Skip NIL properties (grouping/category markers)
+					if (prop["type"].operator int() != Variant::NIL) {
+						encode_property_info(prop, &reply);
+					}
+				}
+				ei_x_encode_empty_list(&reply);
+			}
+		}
+	} else if (strcmp(atom, "get_singletons") == 0) {
+		/* Get list of singleton names */
+		Engine *engine = Engine::get_singleton();
+		if (engine == nullptr) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "engine_unavailable");
+		} else {
+			PackedStringArray singletons = engine->get_singleton_list();
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_list_header(&reply, singletons.size());
+			for (int i = 0; i < singletons.size(); i++) {
+				ei_x_encode_string(&reply, singletons[i].utf8().get_data());
+			}
+			ei_x_encode_empty_list(&reply);
+		}
+	} else if (strcmp(atom, "get_singleton") == 0) {
+		/* Get a singleton by name */
+		char singleton_name[256];
+		if (ei_decode_string(buf, index, singleton_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_singleton_name");
+		} else {
+			Engine *engine = Engine::get_singleton();
+			if (engine == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "engine_unavailable");
+			} else {
+				Object *singleton = engine->get_singleton_object(StringName(String::utf8(singleton_name)));
+				if (singleton == nullptr) {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "singleton_not_found");
+				} else {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "reply");
+					ei_x_encode_tuple_header(&reply, 3);
+					ei_x_encode_atom(&reply, "object");
+					ei_x_encode_string(&reply, singleton->get_class().utf8().get_data());
+					ei_x_encode_long(&reply, (int64_t)singleton->get_instance_id());
+				}
+			}
+		}
+	} else if (strcmp(atom, "call_object_method") == 0) {
+		/* Call a method on any object (not just Node) */
+		long object_id;
+		char method_name[256];
+		if (ei_decode_long(buf, index, &object_id) < 0 || ei_decode_string(buf, index, method_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_args");
+		} else {
+			// Decode arguments array
+			Variant args_array = bert_to_variant(buf, index);
+			Array args;
+			if (args_array.get_type() == Variant::ARRAY) {
+				args = args_array.operator Array();
+			}
+			
+			Object *obj = get_object_by_id(object_id);
+			if (obj == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "object_not_found");
+			} else {
+				String method = String::utf8(method_name);
+				Variant result = obj->callv(method, args);
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				variant_to_bert(result, &reply);
+			}
+		}
+	} else if (strcmp(atom, "get_object_property") == 0) {
+		/* Get a property from any object (not just Node) */
+		long object_id;
+		char prop_name[256];
+		if (ei_decode_long(buf, index, &object_id) < 0 || ei_decode_string(buf, index, prop_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_args");
+		} else {
+			Object *obj = get_object_by_id(object_id);
+			if (obj == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "object_not_found");
+			} else {
+				String prop = String::utf8(prop_name);
+				Variant value = obj->get(prop);
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				variant_to_bert(value, &reply);
+			}
+		}
+	} else if (strcmp(atom, "set_object_property") == 0) {
+		/* Set a property on any object (not just Node) */
+		long object_id;
+		char prop_name[256];
+		if (ei_decode_long(buf, index, &object_id) < 0 || ei_decode_string(buf, index, prop_name) < 0) {
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "invalid_args");
+		} else {
+			Variant value = bert_to_variant(buf, index);
+			Object *obj = get_object_by_id(object_id);
+			if (obj == nullptr) {
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "error");
+				ei_x_encode_string(&reply, "object_not_found");
+			} else {
+				String prop = String::utf8(prop_name);
+				obj->set(prop, value);
+				ei_x_encode_tuple_header(&reply, 2);
+				ei_x_encode_atom(&reply, "reply");
+				ei_x_encode_atom(&reply, "ok");
 			}
 		}
 	} else {
