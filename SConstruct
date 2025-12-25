@@ -177,24 +177,24 @@ if erl_lib_paths:
     env.Prepend(LIBPATH=erl_lib_paths)
 env.Append(LIBS=erl_libs)
 
-# Build as shared library (GDExtension) - output to test_project
+# Build as shared library (GDExtension) - output to bin/samples
 if env["platform"] == "macos":
     library = env.SharedLibrary(
-        "test_project/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
+        "bin/samples/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
             env["suffix"], env["suffix"]
         ),
         source=sources,
     )
 elif env["platform"] == "ios":
     library = env.SharedLibrary(
-        "test_project/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
+        "bin/samples/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
             env["suffix"], env["suffix"]
         ),
         source=sources,
     )
 else:
     library = env.SharedLibrary(
-        "test_project/addons/godot_cnode/bin/libgodot_cnode{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+        "bin/samples/addons/godot_cnode/bin/libgodot_cnode{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
         source=sources,
     )
 

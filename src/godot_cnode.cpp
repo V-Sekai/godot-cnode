@@ -19,6 +19,7 @@
 // Include C headers that define timespec BEFORE any C++ headers
 #include <errno.h>
 #include <time.h>
+#include <cstdio>
 #include <cstring>
 
 // POSIX-specific headers (not available on Windows)
@@ -356,14 +357,14 @@ int init_cnode(char *nodename, char *cookie) {
 	/* Initialize ei library */
 	res = ei_connect_init(&ec, nodename, cookie, 0);
 	if (res < 0) {
-		UtilityFunctions::printerr(String("ei_connect_init failed: ") + String::num(res));
+		fprintf(stderr, "ei_connect_init failed: %d\n", res);
 		return -1;
 	}
 
 	/* Publish the node and get listen file descriptor */
 	fd = ei_publish(&ec, 0);
 	if (fd < 0) {
-		UtilityFunctions::printerr(String("ei_publish failed: ") + String::num(fd));
+		fprintf(stderr, "ei_publish failed: %d\n", fd);
 		return -1;
 	}
 
@@ -380,13 +381,13 @@ int init_cnode(char *nodename, char *cookie) {
 static int process_message(char *buf, int *index, int fd) {
 	// Guard: Check for null pointers
 	if (buf == nullptr || index == nullptr) {
-		UtilityFunctions::printerr("Error: null pointer in process_message");
+		fprintf(stderr, "Error: null pointer in process_message\n");
 		return -1;
 	}
 
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
-		UtilityFunctions::printerr("Error: invalid file descriptor in process_message");
+		fprintf(stderr, "Error: invalid file descriptor in process_message\n");
 		return -1;
 	}
 
@@ -396,18 +397,18 @@ static int process_message(char *buf, int *index, int fd) {
 
 	/* Decode the message */
 	if (ei_decode_version(buf, index, NULL) < 0) {
-		UtilityFunctions::printerr("Error decoding version");
+		fprintf(stderr, "Error decoding version\n");
 		return -1;
 	}
 
 	if (ei_decode_tuple_header(buf, index, &arity) < 0) {
-		UtilityFunctions::printerr("Error decoding tuple header");
+		fprintf(stderr, "Error decoding tuple header\n");
 		return -1;
 	}
 
 	/* Get the message type atom */
 	if (ei_decode_atom(buf, index, atom) < 0) {
-		UtilityFunctions::printerr("Error decoding atom");
+		fprintf(stderr, "Error decoding atom\n");
 		return -1;
 	}
 
@@ -417,18 +418,18 @@ static int process_message(char *buf, int *index, int fd) {
 		// Decode the From tuple {From, Tag}
 		int from_arity;
 		if (ei_decode_tuple_header(buf, index, &from_arity) < 0 || from_arity != 2) {
-			UtilityFunctions::printerr("Error decoding From tuple in gen_call");
+			fprintf(stderr, "Error decoding From tuple in gen_call\n");
 			return -1;
 		}
 		// Skip From (PID) and Tag (reference) - we don't need them for CNode
 		erlang_pid from_pid;
 		erlang_ref tag_ref;
 		if (ei_decode_pid(buf, index, &from_pid) < 0) {
-			UtilityFunctions::printerr("Error decoding From PID in gen_call");
+			fprintf(stderr, "Error decoding From PID in gen_call\n");
 			return -1;
 		}
 		if (ei_decode_ref(buf, index, &tag_ref) < 0) {
-			UtilityFunctions::printerr("Error decoding Tag in gen_call");
+			fprintf(stderr, "Error decoding Tag in gen_call\n");
 			return -1;
 		}
 		// Now decode the Request
@@ -439,7 +440,7 @@ static int process_message(char *buf, int *index, int fd) {
 		return handle_cast(buf, index);
 	} else {
 		/* Only GenServer-style messages are supported */
-		UtilityFunctions::printerr(String("Only GenServer-style messages supported. Got: ") + atom);
+		fprintf(stderr, "Only GenServer-style messages supported. Got: %s\n", atom);
 		return -1;
 	}
 }
@@ -524,13 +525,13 @@ static void encode_property_info(const Dictionary &property, ei_x_buff *x) {
 static int handle_call(char *buf, int *index, int fd) {
 	// Guard: Check for null pointers
 	if (buf == nullptr || index == nullptr) {
-		UtilityFunctions::printerr("Error: null pointer in handle_call");
+		fprintf(stderr, "Error: null pointer in handle_call\n");
 		return -1;
 	}
 
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
-		UtilityFunctions::printerr("Error: invalid file descriptor in handle_call");
+		fprintf(stderr, "Error: invalid file descriptor in handle_call\n");
 		return -1;
 	}
 
@@ -919,14 +920,14 @@ static int handle_call(char *buf, int *index, int fd) {
 static int handle_cast(char *buf, int *index) {
 	// Guard: Check for null pointers
 	if (buf == nullptr || index == nullptr) {
-		UtilityFunctions::printerr("Error: null pointer in handle_cast");
+		fprintf(stderr, "Error: null pointer in handle_cast\n");
 		return -1;
 	}
 
 	/* Decode Request: {Module, Function, Args} */
 	int request_arity;
 	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
-		UtilityFunctions::printerr("Error: invalid request format in gen_cast");
+		fprintf(stderr, "Error: invalid request format in gen_cast\n");
 		return -1;
 	}
 
@@ -935,12 +936,12 @@ static int handle_cast(char *buf, int *index) {
 	char function[256];
 
 	if (ei_decode_atom(buf, index, module) < 0) {
-		UtilityFunctions::printerr("Error decoding module in cast");
+		fprintf(stderr, "Error decoding module in cast\n");
 		return -1;
 	}
 
 	if (ei_decode_atom(buf, index, function) < 0) {
-		UtilityFunctions::printerr("Error decoding function in cast");
+		fprintf(stderr, "Error decoding function in cast\n");
 		return -1;
 	}
 
@@ -1001,19 +1002,19 @@ static int handle_cast(char *buf, int *index) {
 static void send_reply(ei_x_buff *x, int fd) {
 	// Guard: Check for null pointer
 	if (x == nullptr) {
-		UtilityFunctions::printerr("Error: null reply buffer in send_reply");
+		fprintf(stderr, "Error: null reply buffer in send_reply\n");
 		return;
 	}
 
 	// Guard: Check for valid file descriptor
 	if (fd < 0) {
-		UtilityFunctions::printerr("Error: invalid file descriptor in send_reply");
+		fprintf(stderr, "Error: invalid file descriptor in send_reply\n");
 		return;
 	}
 
 	/* Send encoded message to the connected node */
 	if (ei_send_encoded(fd, NULL, x->buff, x->index) < 0) {
-		UtilityFunctions::printerr("Error sending reply");
+		fprintf(stderr, "Error sending reply\n");
 	}
 }
 
@@ -1027,7 +1028,7 @@ void main_loop() {
 	int fd;
 	int res;
 
-	UtilityFunctions::print("Godot CNode: Entering main loop");
+	printf("Godot CNode: Entering main loop\n");
 
 	ei_x_new(&x);
 
@@ -1035,7 +1036,7 @@ void main_loop() {
 		/* Accept connection from Erlang/Elixir node */
 		fd = ei_accept(&ec, listen_fd, NULL);
 		if (fd < 0) {
-			UtilityFunctions::printerr(String("ei_accept failed: ") + String::num(fd));
+			fprintf(stderr, "ei_accept failed: %d\n", fd);
 			break;
 		}
 
@@ -1046,7 +1047,7 @@ void main_loop() {
 			/* Just a tick, continue */
 			continue;
 		} else if (res == ERL_ERROR) {
-			UtilityFunctions::printerr(String("Error receiving message: ") + String::num(res));
+			fprintf(stderr, "Error receiving message: %d\n", res);
 			close(fd);
 			continue;
 		}
@@ -1054,7 +1055,7 @@ void main_loop() {
 		/* Process the message */
 		x.index = 0;
 		if (process_message(x.buff, &x.index, fd) < 0) {
-			UtilityFunctions::printerr("Error processing message");
+			fprintf(stderr, "Error processing message\n");
 		}
 
 		close(fd);

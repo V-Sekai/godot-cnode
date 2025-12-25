@@ -9,6 +9,7 @@
 .vscode
 
 bin/.godot
+bin/samples/.godot/
 bin/addons/godot_cnode/bin/
 *.code-workspace
 

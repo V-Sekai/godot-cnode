@@ -5,10 +5,10 @@ compatibility_minimum = 4.1
 
 [libraries]
 
-macos.debug = "bin/libgodot_cnode.macos.template_release.universal.framework"
-macos.release = "bin/libgodot_cnode.macos.template_release.universal.framework"
-macos.debug.double = "bin/libgodot_cnode.macos.template_release.double.universal.framework"
-macos.release.double = "bin/libgodot_cnode.macos.template_release.double.universal.framework"
+macos.debug = "bin/libgodot_cnode.macos.template_release.arm64.framework"
+macos.release = "bin/libgodot_cnode.macos.template_release.arm64.framework"
+macos.debug.double = "bin/libgodot_cnode.macos.template_release.double.arm64.framework"
+macos.release.double = "bin/libgodot_cnode.macos.template_release.double.arm64.framework"
 
 ios.debug = "bin/libgodot_cnode.ios.template_release.arm64.dylib"
 ios.release = "bin/libgodot_cnode.ios.template_release.arm64.dylib"
@@ -46,4 +46,3 @@ android.debug.double.arm64 = "bin/libgodot_cnode.android.template_release.double
 android.release.double.arm64 = "bin/libgodot_cnode.android.template_release.double.arm64.so"
 android.debug.double.arm32 = "bin/libgodot_cnode.android.template_release.double.arm32.so"
 android.release.double.arm32 = "bin/libgodot_cnode.android.template_release.double.arm32.so"
-

@@ -27,12 +27,7 @@ Note: Web platform is not supported. This extension requires Erlang's native dis
 
 ### Build Steps
 
-1. Clone godot-cpp as a submodule or copy it to `thirdparty/godot-cpp`:
-   ```bash
-   git submodule add https://github.com/godotengine/godot-cpp.git thirdparty/godot-cpp
-   ```
-
-2. Build the GDExtension:
+1. Build the GDExtension:
    ```bash
    scons target=template_release platform=<platform>
    ```
