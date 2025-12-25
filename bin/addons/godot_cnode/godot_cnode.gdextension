@@ -47,8 +47,3 @@ android.release.double.arm64 = "bin/libgodot_cnode.android.template_release.doub
 android.debug.double.arm32 = "bin/libgodot_cnode.android.template_release.double.arm32.so"
 android.release.double.arm32 = "bin/libgodot_cnode.android.template_release.double.arm32.so"
 
-web.debug.wasm32 = "bin/libgodot_cnode.web.template_release.wasm32.wasm"
-web.release.wasm32 = "bin/libgodot_cnode.web.template_release.wasm32.wasm"
-web.debug.double.wasm32 = "bin/libgodot_cnode.web.template_release.double.wasm32.wasm"
-web.release.double.wasm32 = "bin/libgodot_cnode.web.template_release.double.wasm32.wasm"
-

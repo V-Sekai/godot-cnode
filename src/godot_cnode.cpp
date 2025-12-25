@@ -33,6 +33,7 @@
 #define close _close
 #endif
 
+// erl_interface headers
 extern "C" {
 #include "ei.h"
 #include "ei_connect.h"

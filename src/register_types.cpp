@@ -5,7 +5,9 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <atomic>
 #include <cstring>
 #include <thread>
@@ -18,6 +20,7 @@ static std::atomic<bool> cnode_running(false);
 extern "C" {
 extern godot_instance_t instances[MAX_INSTANCES];
 extern int listen_fd;
+extern int next_instance_id;
 int init_cnode(char *nodename, char *cookie);
 void main_loop(void);
 }

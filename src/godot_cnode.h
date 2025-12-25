@@ -22,6 +22,7 @@ typedef struct {
 
 extern godot_instance_t instances[MAX_INSTANCES];
 extern int listen_fd;
+extern int next_instance_id;
 
 int init_cnode(char *nodename, char *cookie);
 void main_loop(void);
