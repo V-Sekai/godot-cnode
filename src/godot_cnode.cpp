@@ -8,18 +8,30 @@
  */
 
 // Define POSIX feature test macros BEFORE any includes to ensure timespec is defined
+// Only on Unix systems (not Windows)
+#ifndef _WIN32
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
 #endif
 #define _POSIX_C_SOURCE 200112L
+#endif
 
 // Include C headers that define timespec BEFORE any C++ headers
 #include <errno.h>
+#include <time.h>
+#include <cstring>
+
+// POSIX-specific headers (not available on Windows)
+#ifndef _WIN32
 #include <sys/time.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
-#include <cstring>
+#else
+// Windows equivalents
+#include <windows.h>
+#include <io.h>
+#define close _close
+#endif
 
 extern "C" {
 #include "ei.h"
