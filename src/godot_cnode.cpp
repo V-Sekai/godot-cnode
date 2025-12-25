@@ -1135,6 +1135,26 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 			ei_x_encode_atom(&reply, "error");
 			ei_x_encode_string(&reply, "unknown_function");
 		}
+	} else if (strcmp(module, "erlang") == 0) {
+		// Erlang built-in functions
+		if (strcmp(function, "node") == 0) {
+			// {call, erlang, node, []} - return the CNode's name
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			ei_x_encode_atom(&reply, ec.thisnodename);
+		} else if (strcmp(function, "nodes") == 0) {
+			// {call, erlang, nodes, []} - return list of connected nodes
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "reply");
+			// Return empty list for now (CNode doesn't track connected nodes)
+			ei_x_encode_list_header(&reply, 0);
+			ei_x_encode_empty_list(&reply);
+		} else {
+			// Unknown function in erlang module
+			ei_x_encode_tuple_header(&reply, 2);
+			ei_x_encode_atom(&reply, "error");
+			ei_x_encode_string(&reply, "unknown_function");
+		}
 	} else {
 		// Unknown module
 		ei_x_encode_tuple_header(&reply, 2);
@@ -1365,7 +1385,22 @@ void main_loop() {
 			printf(" (ERL_TICK - keepalive)\n");
 			continue;
 		} else if (res == ERL_ERROR) {
-			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", errno, strerror(errno));
+			int saved_errno = errno;
+			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", saved_errno, strerror(saved_errno));
+			/* macOS issue: errno 42 (Protocol not available) - data may still be in buffer */
+			if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
+				/* Try to process message anyway if buffer has data */
+				if (x.index > 0) {
+					printf("Godot CNode: Attempting to process message despite errno 42 (macOS compatibility)\n");
+					/* Process the message from buffer */
+					x.index = 0;
+					if (process_message(x.buff, &x.index, fd) < 0) {
+						fprintf(stderr, "Error processing message\n");
+					}
+					close(fd);
+					continue;
+				}
+			}
 			close(fd);
 			continue;
 		} else {
