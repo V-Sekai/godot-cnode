@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = https://github.com/godotengine/godot-cpp
-	branch = 4.1
-	commit = 631cd5fe37d4e6df6e5eb66eb4435feca12708cc
-	parent = b4aabe6acec178219fc7e3505ffa99e3c6f02956
+	branch = 4.3
+	commit = d5cc777a89d899665fb61f1650ef0dc0cf6488c4
+	parent = 92124b4c68e9818b8ea59877d258dda265b91949
 	method = merge
-	cmdver = 0.4.6
+	cmdver = 0.4.9

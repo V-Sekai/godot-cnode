@@ -38,7 +38,7 @@ namespace godot {
 
 class String;
 
-struct _NO_DISCARD_ Vector4 {
+struct [[nodiscard]] Vector4 {
 	static const int AXIS_COUNT = 4;
 
 	enum Axis {
@@ -55,16 +55,17 @@ struct _NO_DISCARD_ Vector4 {
 			real_t z;
 			real_t w;
 		};
-		real_t components[4] = { 0, 0, 0, 0 };
+		[[deprecated("Use coord instead")]] real_t components[4];
+		real_t coord[4] = { 0, 0, 0, 0 };
 	};
 
 	_FORCE_INLINE_ real_t &operator[](const int p_axis) {
 		DEV_ASSERT((unsigned int)p_axis < 4);
-		return components[p_axis];
+		return coord[p_axis];
 	}
 	_FORCE_INLINE_ const real_t &operator[](const int p_axis) const {
 		DEV_ASSERT((unsigned int)p_axis < 4);
-		return components[p_axis];
+		return coord[p_axis];
 	}
 
 	Vector4::Axis min_axis_index() const;
@@ -74,13 +75,22 @@ struct _NO_DISCARD_ Vector4 {
 		return Vector4(MIN(x, p_vector4.x), MIN(y, p_vector4.y), MIN(z, p_vector4.z), MIN(w, p_vector4.w));
 	}
 
+	Vector4 minf(real_t p_scalar) const {
+		return Vector4(MIN(x, p_scalar), MIN(y, p_scalar), MIN(z, p_scalar), MIN(w, p_scalar));
+	}
+
 	Vector4 max(const Vector4 &p_vector4) const {
 		return Vector4(MAX(x, p_vector4.x), MAX(y, p_vector4.y), MAX(z, p_vector4.z), MAX(w, p_vector4.w));
+	}
+
+	Vector4 maxf(real_t p_scalar) const {
+		return Vector4(MAX(x, p_scalar), MAX(y, p_scalar), MAX(z, p_scalar), MAX(w, p_scalar));
 	}
 
 	_FORCE_INLINE_ real_t length_squared() const;
 	bool is_equal_approx(const Vector4 &p_vec4) const;
 	bool is_zero_approx() const;
+	bool is_finite() const;
 	real_t length() const;
 	void normalize();
 	Vector4 normalized() const;
@@ -102,8 +112,11 @@ struct _NO_DISCARD_ Vector4 {
 	Vector4 posmod(const real_t p_mod) const;
 	Vector4 posmodv(const Vector4 &p_modv) const;
 	void snap(const Vector4 &p_step);
+	void snapf(real_t p_step);
 	Vector4 snapped(const Vector4 &p_step) const;
+	Vector4 snappedf(real_t p_step) const;
 	Vector4 clamp(const Vector4 &p_min, const Vector4 &p_max) const;
+	Vector4 clampf(real_t p_min, real_t p_max) const;
 
 	Vector4 inverse() const;
 	_FORCE_INLINE_ real_t dot(const Vector4 &p_vec4) const;

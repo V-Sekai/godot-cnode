@@ -47,8 +47,6 @@ class ObjectID;
 class Variant {
 	uint8_t opaque[GODOT_CPP_VARIANT_SIZE]{ 0 };
 
-	_FORCE_INLINE_ GDExtensionVariantPtr _native_ptr() const { return const_cast<uint8_t(*)[GODOT_CPP_VARIANT_SIZE]>(&opaque); }
-
 	friend class GDExtensionBinding;
 	friend class MethodBind;
 
@@ -102,6 +100,7 @@ public:
 		PACKED_VECTOR2_ARRAY,
 		PACKED_VECTOR3_ARRAY,
 		PACKED_COLOR_ARRAY,
+		PACKED_VECTOR4_ARRAY,
 
 		VARIANT_MAX
 	};
@@ -122,6 +121,7 @@ public:
 		OP_NEGATE,
 		OP_POSITIVE,
 		OP_MODULE,
+		OP_POWER,
 		// bitwise
 		OP_SHIFT_LEFT,
 		OP_SHIFT_RIGHT,
@@ -144,6 +144,7 @@ private:
 	static GDExtensionTypeFromVariantConstructorFunc to_type_constructor[VARIANT_MAX];
 
 public:
+	_FORCE_INLINE_ GDExtensionVariantPtr _native_ptr() const { return const_cast<uint8_t(*)[GODOT_CPP_VARIANT_SIZE]>(&opaque); }
 	Variant();
 	Variant(std::nullptr_t n) :
 			Variant() {}
@@ -154,9 +155,17 @@ public:
 	Variant(int64_t v);
 	Variant(int32_t v) :
 			Variant(static_cast<int64_t>(v)) {}
-	Variant(uint32_t v) :
+	Variant(int16_t v) :
+			Variant(static_cast<int64_t>(v)) {}
+	Variant(int8_t v) :
 			Variant(static_cast<int64_t>(v)) {}
 	Variant(uint64_t v) :
+			Variant(static_cast<int64_t>(v)) {}
+	Variant(uint32_t v) :
+			Variant(static_cast<int64_t>(v)) {}
+	Variant(uint16_t v) :
+			Variant(static_cast<int64_t>(v)) {}
+	Variant(uint8_t v) :
 			Variant(static_cast<int64_t>(v)) {}
 	Variant(double v);
 	Variant(float v) :
@@ -204,13 +213,18 @@ public:
 	Variant(const PackedVector2Array &v);
 	Variant(const PackedVector3Array &v);
 	Variant(const PackedColorArray &v);
+	Variant(const PackedVector4Array &v);
 	~Variant();
 
 	operator bool() const;
 	operator int64_t() const;
 	operator int32_t() const;
+	operator int16_t() const;
+	operator int8_t() const;
 	operator uint64_t() const;
 	operator uint32_t() const;
+	operator uint16_t() const;
+	operator uint8_t() const;
 	operator double() const;
 	operator float() const;
 	operator String() const;
@@ -248,6 +262,7 @@ public:
 	operator PackedVector2Array() const;
 	operator PackedVector3Array() const;
 	operator PackedColorArray() const;
+	operator PackedVector4Array() const;
 
 	Variant &operator=(const Variant &other);
 	Variant &operator=(Variant &&other);
@@ -257,7 +272,7 @@ public:
 
 	void callp(const StringName &method, const Variant **args, int argcount, Variant &r_ret, GDExtensionCallError &r_error);
 
-	template <class... Args>
+	template <typename... Args>
 	Variant call(const StringName &method, Args... args) {
 		std::array<Variant, sizeof...(args)> vargs = { args... };
 		std::array<const Variant *, sizeof...(args)> argptrs;
@@ -272,7 +287,7 @@ public:
 
 	static void callp_static(Variant::Type type, const StringName &method, const Variant **args, int argcount, Variant &r_ret, GDExtensionCallError &r_error);
 
-	template <class... Args>
+	template <typename... Args>
 	static Variant call_static(Variant::Type type, const StringName &method, Args... args) {
 		std::array<Variant, sizeof...(args)> vargs = { args... };
 		std::array<const Variant *, sizeof...(args)> argptrs;
@@ -312,8 +327,6 @@ public:
 	bool booleanize() const;
 	String stringify() const;
 	Variant duplicate(bool deep = false) const;
-	static void blend(const Variant &a, const Variant &b, float c, Variant &r_dst);
-	static void interpolate(const Variant &a, const Variant &b, float c, Variant &r_dst);
 
 	static String get_type_name(Variant::Type type);
 	static bool can_convert(Variant::Type from, Variant::Type to);
@@ -341,6 +354,14 @@ String vformat(const String &p_text, const VarArgs... p_args) {
 
 	return p_text % args_array;
 }
+
+#include <godot_cpp/variant/builtin_vararg_methods.hpp>
+
+#ifdef REAL_T_IS_DOUBLE
+using PackedRealArray = PackedFloat64Array;
+#else
+using PackedRealArray = PackedFloat32Array;
+#endif // REAL_T_IS_DOUBLE
 
 } // namespace godot
 

@@ -16,20 +16,20 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: Godot_Whisper
-          path: godot-whisper
+          name: Godot_CNode
+          path: godot-cnode
       - name: Delete draft release(s)
         uses: hugo19941994/delete-draft-releases@v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Archive
         shell: sh
-        run: zip -r "Godot_Whisper.zip" godot-whisper
+        run: zip -r "Godot_CNode.zip" godot-cnode
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          name: Godot Whisper
-          files: Godot_Whisper.zip
+          name: Godot CNode
+          files: Godot_CNode.zip
           generate_release_notes: true
           draft: true
           prerelease: true

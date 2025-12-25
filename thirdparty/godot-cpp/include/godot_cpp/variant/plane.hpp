@@ -38,7 +38,7 @@ namespace godot {
 
 class Variant;
 
-struct _NO_DISCARD_ Plane {
+struct [[nodiscard]] Plane {
 	Vector3 normal;
 	real_t d = 0;
 
@@ -77,6 +77,7 @@ struct _NO_DISCARD_ Plane {
 	Plane operator-() const { return Plane(-normal, -d); }
 	bool is_equal_approx(const Plane &p_plane) const;
 	bool is_equal_approx_any_side(const Plane &p_plane) const;
+	bool is_finite() const;
 
 	_FORCE_INLINE_ bool operator==(const Plane &p_plane) const;
 	_FORCE_INLINE_ bool operator!=(const Plane &p_plane) const;
