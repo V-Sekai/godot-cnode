@@ -9,7 +9,10 @@ This GDExtension allows Erlang/Elixir nodes to communicate with Godot using the 
 ### Prerequisites
 
 - Godot 4.1+ source code (for godot-cpp)
-- Erlang/OTP (for erl_interface headers)
+- Erlang/OTP with erl_interface development libraries installed:
+  - **Linux**: `sudo apt-get install erlang-dev` (Debian/Ubuntu) or equivalent
+  - **macOS**: `brew install erlang` (Homebrew)
+  - **Windows**: Install Erlang/OTP from [erlang.org](https://www.erlang.org/downloads)
 - SCons
 
 ### Build Steps
@@ -19,16 +22,12 @@ This GDExtension allows Erlang/Elixir nodes to communicate with Godot using the 
    git submodule add https://github.com/godotengine/godot-cpp.git thirdparty/godot-cpp
    ```
 
-2. Copy erl_interface source to `thirdparty/erl_interface`:
-   ```bash
-   # Extract erl_interface from Erlang/OTP source
-   cp -r /path/to/otp/lib/erl_interface thirdparty/
-   ```
-
-3. Build the GDExtension:
+2. Build the GDExtension:
    ```bash
    scons target=template_release
    ```
+
+The build system will automatically detect and use the system-installed erl_interface libraries.
 
 ## Usage
 
