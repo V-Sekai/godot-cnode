@@ -44,9 +44,6 @@ jobs:
           - target: { platform: android, arch: arm64, os: ubuntu-latest }
             target-type: template_release
             float-precision: single
-          - target: { platform: web, arch: wasm32, os: ubuntu-latest }
-            target-type: template_release
-            float-precision: double
     runs-on: ${{ matrix.target.os }}
     steps:
       # Clone this repository
@@ -117,7 +114,6 @@ jobs:
           path: |
             ${{ github.workspace }}/bin/**/*.so
             ${{ github.workspace }}/bin/**/*.dll
-            ${{ github.workspace }}/bin/**/*.wasm
             ${{ github.workspace }}/bin/**/*.framework/**
             ${{ github.workspace }}/bin/addons/godot_cnode/**
           if-no-files-found: error
@@ -139,7 +135,6 @@ jobs:
             { platform: android, arch: x86_64, os: ubuntu-latest },
             { platform: android, arch: x86_32, os: ubuntu-latest },
             { platform: ios, arch: arm64, os: macos-latest },
-            { platform: web, arch: wasm32, os: ubuntu-latest },
           ]
         target-type: [template_release]
         float-precision: [single, double]
@@ -213,7 +208,6 @@ jobs:
           path: |
             ${{ github.workspace }}/bin/**/*.so
             ${{ github.workspace }}/bin/**/*.dll
-            ${{ github.workspace }}/bin/**/*.wasm
             ${{ github.workspace }}/bin/**/*.framework/**
             ${{ github.workspace }}/bin/addons/godot_cnode/**
           if-no-files-found: error
