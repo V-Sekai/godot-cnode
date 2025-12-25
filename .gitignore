@@ -33,3 +33,11 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# Erlang/Elixir
+erl_crash.dump
+*.beam
+*.dump
+
+# Pre-commit
+.pre-commit-cache/

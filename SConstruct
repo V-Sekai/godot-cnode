@@ -26,19 +26,19 @@ def find_erl_interface():
     include_paths = []
     lib_paths = []
     libs = []
-    
+
     # Try pkg-config first (not available on Windows by default)
     if sys.platform != 'win32':
         try:
-            result = subprocess.run(['pkg-config', '--cflags', 'erl_interface'], 
+            result = subprocess.run(['pkg-config', '--cflags', 'erl_interface'],
                                   capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 flags = result.stdout.strip().split()
                 for flag in flags:
                     if flag.startswith('-I'):
                         include_paths.append(flag[2:])
-            
-            result = subprocess.run(['pkg-config', '--libs', 'erl_interface'], 
+
+            result = subprocess.run(['pkg-config', '--libs', 'erl_interface'],
                                   capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 flags = result.stdout.strip().split()
@@ -49,17 +49,17 @@ def find_erl_interface():
                         libs.append(flag[2:])
         except:
             pass
-    
+
     # If pkg-config didn't work, try common installation paths
     if not include_paths:
         # Common Erlang installation paths
         search_paths = []
-        
+
         # Check ERL_TOP environment variable
         erl_top = os.environ.get('ERL_TOP')
         if erl_top:
             search_paths.append(os.path.join(erl_top, 'lib', 'erl_interface'))
-        
+
         # Standard system paths
         if sys.platform == 'darwin':  # macOS
             # Homebrew paths
@@ -77,7 +77,7 @@ def find_erl_interface():
             # Common Windows Erlang paths
             program_files = os.environ.get('ProgramFiles', 'C:\\Program Files')
             program_files_x86 = os.environ.get('ProgramFiles(x86)', os.path.join('C:\\', 'Program Files (x86)'))
-            
+
             # Try exact paths first (without glob)
             exact_paths = [
                 os.path.join(program_files, 'Erlang OTP', 'lib'),
@@ -100,7 +100,7 @@ def find_erl_interface():
                             break
                     except:
                         pass
-            
+
             # Fallback to glob patterns
             if not include_paths:
                 search_paths.extend([
@@ -108,7 +108,7 @@ def find_erl_interface():
                     os.path.join(program_files_x86, 'Erlang OTP', 'lib', 'erl_interface-*'),
                     os.path.join(program_files, 'erl-*', 'lib', 'erl_interface-*'),
                 ])
-        
+
         # Find the most recent version
         for pattern in search_paths:
             matches = glob.glob(pattern)
@@ -118,13 +118,13 @@ def find_erl_interface():
                 erl_interface_base = matches[0]
                 include_dir = os.path.join(erl_interface_base, 'include')
                 lib_dir = os.path.join(erl_interface_base, 'lib')
-                
+
                 if os.path.exists(include_dir):
                     include_paths.append(include_dir)
                 if os.path.exists(lib_dir):
                     lib_paths.append(lib_dir)
                 break
-    
+
     # Default library names if not found via pkg-config
     if not libs:
         # On Windows, library names differ by compiler
@@ -134,7 +134,7 @@ def find_erl_interface():
             libs = ['ei']
         else:
             libs = ['ei']
-    
+
     return include_paths, lib_paths, libs
 
 # Get erl_interface paths
@@ -145,7 +145,7 @@ if not erl_include_paths:
     # Fallback: try to use erlang-config or erl (Unix only)
     if sys.platform != 'win32':
         try:
-            result = subprocess.run(['erl', '-noshell', '-eval', 
+            result = subprocess.run(['erl', '-noshell', '-eval',
                                    'io:format("~s~n", [code:lib_dir(erl_interface)]), halt().'],
                                   capture_output=True, text=True, timeout=5)
             if result.returncode == 0:

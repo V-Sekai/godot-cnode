@@ -31,9 +31,9 @@ Note: Web platform is not supported. This extension requires Erlang's native dis
    ```bash
    scons target=template_release platform=<platform>
    ```
-   
+
    Where `<platform>` is one of: `linux`, `macos`, `windows`, `ios`, or `android`.
-   
+
    Example:
    ```bash
    scons target=template_release platform=linux

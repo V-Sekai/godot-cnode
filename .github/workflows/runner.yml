@@ -187,5 +187,3 @@ jobs:
       contents: write
     needs: [merge]
     uses: ./.github/workflows/release.yml
-
-

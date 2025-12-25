@@ -7,9 +7,9 @@ defmodule GodotCNodeTest do
       {h, 0} -> String.trim(h)
       _ -> "127.0.0.1"
     end
-    
+
     cnode_name = String.to_atom("godot@#{hostname}")
-    
+
     IO.puts("=== Godot CNode Elixir Test ===")
     IO.puts("CNode: #{cnode_name}")
     IO.puts("Cookie: #{@cookie}")
@@ -29,7 +29,7 @@ defmodule GodotCNodeTest do
 
     # Set cookie for Erlang distribution AFTER starting the node
     :erlang.set_cookie(node(), String.to_atom(@cookie))
-    
+
     test_connection(cnode_name)
   end
 
@@ -51,7 +51,7 @@ defmodule GodotCNodeTest do
 
     IO.puts("\nConnecting to CNode: #{cnode_name}")
     IO.puts("  Attempting connection (this may take a moment)...")
-    
+
     max_attempts = 5
     if try_connect_attempt(cnode_name, 1, max_attempts) do
       run_tests(cnode_name)
@@ -93,7 +93,7 @@ defmodule GodotCNodeTest do
 
   defp run_tests(cnode_name) do
     IO.puts("\n=== Running Tests ===")
-    
+
     # Test 1: Check node is in connected nodes
     IO.puts("\n1. Checking connected nodes...")
     nodes = :erlang.nodes()

@@ -11,21 +11,21 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #ifndef _WIN32
-#include <unistd.h>
 #include <pthread.h>
+#include <unistd.h>
 #else
-#include <windows.h>
 #include <process.h>
+#include <windows.h>
 typedef HANDLE pthread_t;
 #endif
-#include <cstring>
 #include <cstdio>
+#include <cstring>
 
 // CNode server thread management
 static pthread_t cnode_thread = 0;
 static bool cnode_running = false;
 // Store cookie as C string to avoid Godot API initialization issues
-static char cnode_cookie[256] = {0}; // Cookie prepared on main thread, stored as C string
+static char cnode_cookie[256] = { 0 }; // Cookie prepared on main thread, stored as C string
 
 // Forward declarations from godot_cnode.cpp
 extern "C" {
@@ -141,35 +141,43 @@ static void *cnode_server_thread_impl(void *userdata) {
 	// Initialize instances array
 	memset(instances, 0, sizeof(instances));
 
-	// Try to get actual hostname
-	char hostname[256] = {0};
-	char nodename[512] = {0};
-	
-	#ifndef _WIN32
-	if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
-		snprintf(nodename, sizeof(nodename), "godot@%s", hostname);
-	} else {
-		// Fallback to localhost if gethostname fails
-		strncpy(hostname, "localhost", sizeof(hostname) - 1);
-		snprintf(nodename, sizeof(nodename), "godot@localhost");
-	}
-	#else
-	// Windows: use localhost as default
-	strncpy(hostname, "localhost", sizeof(hostname) - 1);
-	snprintf(nodename, sizeof(nodename), "godot@localhost");
-	#endif
-
+	// Use localhost first since it's more reliable than .local hostnames
+	// .local hostnames (mDNS) may not resolve correctly in all network configurations
 	printf("Godot CNode GDExtension: Starting server thread...\n");
-	printf("  Node: %s\n", nodename);
 	printf("  Cookie: %s\n", cookie);
 
 	// Try different hostname options in order of preference
-	const char *nodename_options[] = {
-		nodename,                    // Actual hostname
-		"godot@localhost",           // localhost
-		"godot@127.0.0.1",           // IP address
-		nullptr
-	};
+	// Use 127.0.0.1 first since Erlang requires fully qualified hostnames
+	// and "localhost" may be rejected by some Erlang configurations
+	char hostname[256] = { 0 };
+	char nodename[512] = { 0 };
+	const char *nodename_options[4]; // Max 4 options
+	int option_count = 0;
+
+	// Use 127.0.0.1 first (fully qualified, always works)
+	nodename_options[option_count++] = "godot@127.0.0.1";
+	// Also try localhost (may not work if Erlang requires FQDN)
+	nodename_options[option_count++] = "godot@localhost";
+
+	// Also try actual hostname if it's not .local (which may not resolve)
+#ifndef _WIN32
+	if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+		// Only use hostname if it doesn't end in .local (which may not resolve)
+		if (strlen(hostname) > 6 && strcmp(hostname + strlen(hostname) - 6, ".local") != 0) {
+			snprintf(nodename, sizeof(nodename), "godot@%s", hostname);
+			nodename_options[option_count++] = nodename;
+		}
+	}
+#endif
+	nodename_options[option_count] = nullptr;
+
+	printf("  Trying node names in order:");
+	for (int i = 0; i < option_count; i++) {
+		printf(" %s", nodename_options[i]);
+		if (i < option_count - 1)
+			printf(",");
+	}
+	printf("\n");
 
 	bool initialized = false;
 	for (int i = 0; nodename_options[i] != nullptr; i++) {
@@ -237,7 +245,7 @@ void initialize_cnode_module(ModuleInitializationLevel p_level) {
 	// Don't use ANY Godot APIs during initialization - they may crash
 	// We'll start the server later when it's safe to use Godot APIs
 	// For now, just use a default cookie from environment variable (C standard library only)
-	
+
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}

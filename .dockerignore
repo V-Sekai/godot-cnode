@@ -1,0 +1,35 @@
+# Build artifacts
+bin/
+*.o
+*.os
+*.a
+*.so
+*.dylib
+*.framework
+
+# Godot-specific
+.godot/
+*.import
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+erl_crash.dump
+
+# Python
+__pycache__/
+*.pyc
+
+# Git
+.git/
+.gitignore

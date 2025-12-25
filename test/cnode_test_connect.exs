@@ -3,33 +3,74 @@ defmodule GodotCNodeTest do
   @timeout 5000
 
   def run do
-    hostname = case System.cmd("hostname", []) do
-      {h, 0} -> String.trim(h)
-      _ -> "127.0.0.1"
+    # Use localhost since it's more reliable than .local hostnames
+    # The CNode code has fallback logic that tries localhost if hostname fails
+    # Check epmd to see which node name is actually registered
+    cnode_name = case System.cmd("epmd", ["-names"]) do
+      {output, 0} ->
+        # Prefer 127.0.0.1 since it's always valid (localhost may be rejected)
+        cond do
+          String.contains?(output, "godot@127.0.0.1") ->
+            :"godot@127.0.0.1"
+          String.contains?(output, "godot@localhost") ->
+            :"godot@localhost"
+          true ->
+            # Extract the actual registered name from epmd output
+            case Regex.run(~r/name (godot@[\w\.-]+)/, output) do
+              [_, name] -> String.to_atom(name)
+              _ -> :"godot@127.0.0.1"  # Default fallback to IP
+            end
+        end
+      _ ->
+        :"godot@127.0.0.1"  # Default if epmd check fails
     end
-    
-    cnode_name = String.to_atom("godot@#{hostname}")
-    
+
     IO.puts("=== Godot CNode Elixir Test ===")
     IO.puts("CNode: #{cnode_name}")
     IO.puts("Cookie: #{@cookie}")
     IO.puts("")
 
     # Start distributed Erlang node FIRST
-    case :net_kernel.start([:"test@127.0.0.1"]) do
+    # Use a unique node name based on timestamp to avoid conflicts
+    unique_name = :"test_#{System.system_time(:second)}@127.0.0.1"
+
+    case :net_kernel.start([unique_name]) do
       {:ok, _pid} ->
-        IO.puts("✓ Started distributed Erlang node")
+        IO.puts("✓ Started distributed Erlang node: #{node()}")
       {:error, {:already_started, _pid}} ->
-        IO.puts("✓ Distributed Erlang already started")
+        IO.puts("✓ Distributed Erlang already started: #{node()}")
       error ->
         IO.puts("✗ Failed to start distributed Erlang: #{inspect(error)}")
         IO.puts("  Trying to start epmd...")
         start_epmd()
+        # Try again after starting epmd
+        case :net_kernel.start([unique_name]) do
+          {:ok, _pid} ->
+            IO.puts("✓ Started distributed Erlang node after epmd start: #{node()}")
+          {:error, {:already_started, _pid}} ->
+            IO.puts("✓ Distributed Erlang already started: #{node()}")
+          error2 ->
+            IO.puts("✗ Still failed to start distributed Erlang: #{inspect(error2)}")
+            IO.puts("  Attempting to use existing node if available...")
+            # If we can't start a new node, check if we're already in a distributed system
+            if node() != :nonode@nohost do
+              IO.puts("  Using existing distributed node: #{node()}")
+            else
+              IO.puts("  ✗ Cannot proceed without a distributed node")
+              System.halt(1)
+            end
+        end
     end
 
     # Set cookie for Erlang distribution AFTER starting the node
-    :erlang.set_cookie(node(), String.to_atom(@cookie))
-    
+    # Only set cookie if we're in a distributed system
+    if node() != :nonode@nohost do
+      :erlang.set_cookie(node(), String.to_atom(@cookie))
+    else
+      IO.puts("✗ Cannot set cookie: not in a distributed system")
+      System.halt(1)
+    end
+
     test_connection(cnode_name)
   end
 
@@ -51,7 +92,7 @@ defmodule GodotCNodeTest do
 
     IO.puts("\nConnecting to CNode: #{cnode_name}")
     IO.puts("  Attempting connection (this may take a moment)...")
-    
+
     max_attempts = 5
     if try_connect_attempt(cnode_name, 1, max_attempts) do
       run_tests(cnode_name)
@@ -72,13 +113,56 @@ defmodule GodotCNodeTest do
   end
 
   defp try_connect_attempt(cnode_name, attempt, max_attempts) do
-    case :net_kernel.connect_node(cnode_name) do
+    # Get detailed epmd information before attempting connection
+    if attempt == 1 do
+      case System.cmd("epmd", ["-names"]) do
+        {output, 0} ->
+          IO.puts("  epmd status:")
+          IO.puts("    #{String.replace(output, "\n", "\n    ")}")
+          # Extract port for this node
+          case Regex.run(~r/name #{Regex.escape(Atom.to_string(cnode_name))} at port (\d+)/, output) do
+            [_, port_str] ->
+              port = String.to_integer(port_str)
+              IO.puts("  CNode port from epmd: #{port}")
+              # Test if port is reachable
+              test_port_connectivity(port)
+            _ ->
+              IO.puts("  ⚠ Could not find port for #{cnode_name} in epmd output")
+          end
+        _ ->
+          IO.puts("  ⚠ Could not query epmd")
+      end
+    end
+
+    # Attempt connection
+    result = :net_kernel.connect_node(cnode_name)
+
+    case result do
       true ->
         IO.puts("✓ Connected to CNode! (attempt #{attempt})")
         true
       false ->
+        # Get more details about why it failed
+        nodes = :erlang.nodes()
+        IO.puts("  Attempt #{attempt} failed")
+        IO.puts("    Current node: #{node()}")
+        IO.puts("    Connected nodes: #{inspect(nodes)}")
+        IO.puts("    Target node: #{cnode_name}")
+
+        # Check if node is visible to epmd
+        case System.cmd("epmd", ["-names"]) do
+          {output, 0} ->
+            if String.contains?(output, Atom.to_string(cnode_name)) do
+              IO.puts("    ✓ Node is registered with epmd")
+            else
+              IO.puts("    ✗ Node NOT found in epmd")
+            end
+          _ ->
+            IO.puts("    ⚠ Could not check epmd")
+        end
+
         if attempt < max_attempts do
-          IO.puts("  Attempt #{attempt} failed, retrying in 1 second...")
+          IO.puts("    Retrying in 1 second...")
           Process.sleep(1000)
           try_connect_attempt(cnode_name, attempt + 1, max_attempts)
         else
@@ -91,9 +175,21 @@ defmodule GodotCNodeTest do
     end
   end
 
+  defp test_port_connectivity(port) do
+    # Try to connect to the port directly to see if it's reachable
+    case :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false], 1000) do
+      {:ok, socket} ->
+        IO.puts("  ✓ Port #{port} is reachable (direct TCP connection succeeded)")
+        :gen_tcp.close(socket)
+      {:error, reason} ->
+        IO.puts("  ✗ Port #{port} is NOT reachable: #{inspect(reason)}")
+        IO.puts("    This suggests a firewall or network issue")
+    end
+  end
+
   defp run_tests(cnode_name) do
     IO.puts("\n=== Running Tests ===")
-    
+
     # Test 1: Check node is in connected nodes
     IO.puts("\n1. Checking connected nodes...")
     nodes = :erlang.nodes()

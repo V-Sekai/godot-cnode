@@ -7,9 +7,9 @@ defmodule GodotCNodeSimpleTest do
       {h, 0} -> String.trim(h)
       _ -> "127.0.0.1"
     end
-    
+
     cnode_name = String.to_atom("godot@#{hostname}")
-    
+
     IO.puts("=== Godot CNode Simple Test ===")
     IO.puts("CNode: #{cnode_name}")
     IO.puts("Cookie: #{@cookie}")
@@ -28,9 +28,9 @@ defmodule GodotCNodeSimpleTest do
 
     # Set cookie for Erlang distribution AFTER starting the node
     :erlang.set_cookie(node(), String.to_atom(@cookie))
-    
+
     IO.puts("\nConnecting to CNode: #{cnode_name}")
-    
+
     max_attempts = 5
     if try_connect_attempt(cnode_name, 1, max_attempts) do
       IO.puts("\n✓ Successfully connected to CNode!")

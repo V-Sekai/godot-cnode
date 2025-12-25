@@ -35,4 +35,3 @@ The CNode cookie is stored in:
 - Windows: `%APPDATA%/Godot/app_userdata/CNode Test Project/cnode_cookie`
 
 The cookie is automatically generated on first run if it doesn't exist.
-
