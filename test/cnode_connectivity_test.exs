@@ -1,24 +1,21 @@
-#!/usr/bin/env elixir
+defmodule GodotCNodeConnectivityTest do
+  @cookie "godotcookie"
 
-# Basic CNode connectivity test
-# Verifies that the CNode is running and can be connected to
-# Full API testing requires a wrapper module (see README)
-
-@cnode_name :"godot@127.0.0.1"
-@cookie "godotcookie"
-
-defmodule CNodeConnectivityTest do
   def run do
-    IO.puts("=== CNode Connectivity Test ===")
-    IO.puts("CNode: #{@cnode_name}")
+    hostname = case System.cmd("hostname", []) do
+      {h, 0} -> String.trim(h)
+      _ -> "127.0.0.1"
+    end
+    
+    cnode_name = String.to_atom("godot@#{hostname}")
+    
+    IO.puts("=== Godot CNode Connectivity Test ===")
+    IO.puts("CNode: #{cnode_name}")
     IO.puts("Cookie: #{@cookie}")
     IO.puts("")
 
-    # Set cookie for Erlang distribution
-    :erlang.set_cookie(node(), String.to_atom(@cookie))
-
-    # Start distributed Erlang
-    case :net_kernel.start([:"test@127.0.0.1"]) do
+    # Start distributed Erlang node FIRST
+    case :net_kernel.start([:"connectivity_test@127.0.0.1"]) do
       {:ok, _pid} ->
         IO.puts("✓ Started distributed Erlang node")
       {:error, {:already_started, _pid}} ->
@@ -28,33 +25,49 @@ defmodule CNodeConnectivityTest do
         System.halt(1)
     end
 
-    # Try to connect to CNode
-    IO.puts("Connecting to CNode: #{@cnode_name}")
-    case :net_kernel.connect_node(@cnode_name) do
+    # Set cookie for Erlang distribution AFTER starting the node
+    :erlang.set_cookie(node(), String.to_atom(@cookie))
+    
+    IO.puts("\nConnecting to CNode: #{cnode_name}")
+    
+    max_attempts = 10
+    case try_connect(cnode_name, max_attempts) do
       true ->
         IO.puts("✓ Successfully connected to CNode!")
-        IO.puts("")
-        IO.puts("Note: Full API testing requires sending BERT-encoded messages")
-        IO.puts("in the format {call, Module, Function, Args} or {cast, Module, Function, Args}.")
-        IO.puts("See README for details on using the GenServer-style API.")
-        System.halt(0)
+        IO.puts("  Connected nodes: #{inspect(:erlang.nodes())}")
+        IO.puts("\n✓ Connectivity test passed!")
+        0
       false ->
-        IO.puts("✗ Failed to connect to CNode")
-        IO.puts("")
-        IO.puts("Possible issues:")
-        IO.puts("  1. Godot is not running")
-        IO.puts("  2. CNode GDExtension is not loaded")
-        IO.puts("  3. CNode is not published (check Godot console)")
-        IO.puts("  4. Cookie mismatch (expected: #{@cookie})")
-        IO.puts("  5. Network/firewall issues")
-        System.halt(1)
+        IO.puts("✗ Failed to connect to CNode after #{max_attempts} attempts")
+        IO.puts("\nTroubleshooting:")
+        IO.puts("  1. Make sure Godot is running with the CNode GDExtension loaded")
+        IO.puts("  2. Check the CNode name in Godot output (should match: #{cnode_name})")
+        IO.puts("  3. Verify epmd can see the node: epmd -names")
+        IO.puts("  4. Check cookie matches (expected: #{@cookie})")
+        1
+    end
+  end
+
+  defp try_connect(_cnode_name, 0), do: false
+
+  defp try_connect(cnode_name, attempts) do
+    case :net_kernel.connect_node(cnode_name) do
+      true ->
+        true
+      false ->
+        if attempts > 1 do
+          IO.puts("  Connection failed, retrying... (#{attempts - 1} attempts remaining)")
+          Process.sleep(1000)
+          try_connect(cnode_name, attempts - 1)
+        else
+          false
+        end
       :ignored ->
-        IO.puts("✗ Connection to CNode ignored")
-        IO.puts("  This usually means the node name is invalid or already connected")
-        System.halt(1)
+        IO.puts("  Connection ignored (node might not be registered with epmd)")
+        false
     end
   end
 end
 
-CNodeConnectivityTest.run()
-
+exit_code = GodotCNodeConnectivityTest.run()
+System.halt(exit_code)

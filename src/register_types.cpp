@@ -135,22 +135,62 @@ static String read_or_generate_godot_cnode_cookie() {
 
 // CNode server thread function (NO Godot API calls allowed here!)
 static void *cnode_server_thread_impl(void *userdata) {
-	// Node name (could also be made configurable)
-	const char *nodename = "godot@127.0.0.1";
-	
 	// Get cookie from userdata (plain C string passed as void*)
 	const char *cookie = static_cast<const char *>(userdata);
 
 	// Initialize instances array
 	memset(instances, 0, sizeof(instances));
 
+	// Try to get actual hostname
+	char hostname[256] = {0};
+	char nodename[512] = {0};
+	
+	#ifndef _WIN32
+	if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+		snprintf(nodename, sizeof(nodename), "godot@%s", hostname);
+	} else {
+		// Fallback to localhost if gethostname fails
+		strncpy(hostname, "localhost", sizeof(hostname) - 1);
+		snprintf(nodename, sizeof(nodename), "godot@localhost");
+	}
+	#else
+	// Windows: use localhost as default
+	strncpy(hostname, "localhost", sizeof(hostname) - 1);
+	snprintf(nodename, sizeof(nodename), "godot@localhost");
+	#endif
+
 	printf("Godot CNode GDExtension: Starting server thread...\n");
 	printf("  Node: %s\n", nodename);
 	printf("  Cookie: %s\n", cookie);
 
-	// Initialize CNode
-	if (init_cnode(const_cast<char *>(nodename), const_cast<char *>(cookie)) < 0) {
-		fprintf(stderr, "Failed to initialize CNode\n");
+	// Try different hostname options in order of preference
+	const char *nodename_options[] = {
+		nodename,                    // Actual hostname
+		"godot@localhost",           // localhost
+		"godot@127.0.0.1",           // IP address
+		nullptr
+	};
+
+	bool initialized = false;
+	for (int i = 0; nodename_options[i] != nullptr; i++) {
+		if (init_cnode(const_cast<char *>(nodename_options[i]), const_cast<char *>(cookie)) == 0) {
+			initialized = true;
+			if (i > 0) {
+				printf("Godot CNode: Successfully initialized with %s (fallback option %d)\n", nodename_options[i], i);
+			}
+			break;
+		} else {
+			fprintf(stderr, "Failed to initialize CNode with %s", nodename_options[i]);
+			if (nodename_options[i + 1] != nullptr) {
+				fprintf(stderr, ", trying next option...\n");
+			} else {
+				fprintf(stderr, "\n");
+			}
+		}
+	}
+
+	if (!initialized) {
+		fprintf(stderr, "Failed to initialize CNode with all hostname options\n");
 		cnode_running = false;
 		delete[] static_cast<char *>(userdata); // Clean up cookie string
 		return nullptr;

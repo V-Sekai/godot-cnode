@@ -354,18 +354,75 @@ int init_cnode(char *nodename, char *cookie) {
 	int res;
 	int fd;
 
+	/* Zero-initialize the ei_cnode structure */
+	memset(&ec, 0, sizeof(ei_cnode));
+
+	/* Validate inputs */
+	if (nodename == nullptr || strlen(nodename) == 0) {
+		fprintf(stderr, "ei_connect_init: invalid nodename (null or empty)\n");
+		return -1;
+	}
+	
+	/* Validate nodename format: must contain @ */
+	if (strchr(nodename, '@') == nullptr) {
+		fprintf(stderr, "ei_connect_init: invalid nodename format (must be 'name@hostname'): %s\n", nodename);
+		return -1;
+	}
+	
+	/* Validate nodename length - Erlang has limits on atom length */
+	if (strlen(nodename) > 256) {
+		fprintf(stderr, "ei_connect_init: nodename too long (max 256 characters): %zu\n", strlen(nodename));
+		return -1;
+	}
+	
+	if (cookie == nullptr || strlen(cookie) == 0) {
+		fprintf(stderr, "ei_connect_init: invalid cookie (null or empty)\n");
+		return -1;
+	}
+	if (strlen(cookie) > MAXATOMLEN) {
+		fprintf(stderr, "ei_connect_init: cookie too long (max %d characters)\n", MAXATOMLEN);
+		return -1;
+	}
+
 	/* Initialize ei library */
+	/* Note: ei_init() must be called before ei_connect_init() on some systems (especially macOS) */
+	ei_init();
+	
+	/* ei_connect_init returns 0 on success, negative on error */
 	res = ei_connect_init(&ec, nodename, cookie, 0);
 	if (res < 0) {
-		fprintf(stderr, "ei_connect_init failed: %d\n", res);
+		fprintf(stderr, "ei_connect_init failed: %d (errno: %d, %s)\n", res, errno, strerror(errno));
+		fprintf(stderr, "  nodename: %s\n", nodename);
+		fprintf(stderr, "  cookie: %s (length: %zu)\n", cookie, strlen(cookie));
 		return -1;
 	}
 
 	/* Publish the node and get listen file descriptor */
+	/* ei_publish registers with epmd AND creates a listening socket */
+	/* The returned file descriptor IS the listening socket - use it directly */
 	fd = ei_publish(&ec, 0);
 	if (fd < 0) {
-		fprintf(stderr, "ei_publish failed: %d\n", fd);
-		return -1;
+		/* If epmd is not running, try ei_listen as fallback */
+		/* ei_listen creates a listening socket without epmd registration */
+		if (errno == ECONNREFUSED || errno == 61) {
+			fprintf(stderr, "ei_publish failed: epmd (Erlang Port Mapper Daemon) is not running\n");
+			fprintf(stderr, "  Attempting fallback with ei_listen (node may not be discoverable)...\n");
+			
+			int port = 0;  // Let system choose port
+			fd = ei_listen(&ec, &port, 5);  // backlog of 5
+			if (fd < 0) {
+				fprintf(stderr, "ei_listen also failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+				fprintf(stderr, "  To fix: Start epmd with 'epmd -daemon' or ensure Erlang is installed\n");
+				return -1;
+			}
+			fprintf(stderr, "  Successfully created listening socket on port %d (not registered with epmd)\n", port);
+		} else {
+			fprintf(stderr, "ei_publish failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+			return -1;
+		}
+	} else {
+		printf("Godot CNode: Successfully published node with epmd\n");
+		printf("Godot CNode: Using listening socket from ei_publish (fd: %d)\n", fd);
 	}
 
 	listen_fd = fd;
@@ -1032,13 +1089,40 @@ void main_loop() {
 
 	ei_x_new(&x);
 
+	/* Check if listen_fd is valid before entering loop */
+	if (listen_fd < 0) {
+		fprintf(stderr, "Godot CNode: Invalid listen_fd: %d, cannot accept connections\n", listen_fd);
+		return;
+	}
+
 	while (1) {
-		/* Accept connection from Erlang/Elixir node */
-		fd = ei_accept(&ec, listen_fd, NULL);
-		if (fd < 0) {
-			fprintf(stderr, "ei_accept failed: %d\n", fd);
+		/* Check if listen_fd is still valid (might be closed during shutdown) */
+		if (listen_fd < 0) {
+			printf("Godot CNode: listen_fd closed, exiting main loop\n");
 			break;
 		}
+
+		/* Accept connection from Erlang/Elixir node */
+		/* Use ei_accept_tmo with a timeout (5 seconds) to avoid blocking indefinitely */
+		/* ei_accept_tmo returns immediately if no connection, ei_accept blocks forever */
+		fd = ei_accept_tmo(&ec, listen_fd, NULL, 5000);  // 5 second timeout
+		if (fd < 0) {
+			/* Check if it's a timeout (expected when no connections) */
+			if (errno == ETIMEDOUT || errno == 60) {
+				/* Timeout is normal - just means no connection yet, continue waiting */
+				continue;
+			} else if (errno == EBADF || errno == 9) {
+				/* Bad file descriptor - socket was closed */
+				fprintf(stderr, "Godot CNode: listen_fd closed (errno: %d, %s)\n", errno, strerror(errno));
+				break;
+			} else {
+				/* Other error - log but continue */
+				fprintf(stderr, "ei_accept_tmo failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+				usleep(100000);  // 100ms before retry
+				continue;
+			}
+		}
+		printf("Godot CNode: Accepted connection on fd: %d\n", fd);
 
 		/* Receive message */
 		res = ei_receive_msg(fd, &msg, &x);
