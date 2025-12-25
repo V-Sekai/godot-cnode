@@ -24,7 +24,6 @@
 
 // POSIX-specific headers (not available on Windows)
 #ifndef _WIN32
-#include <CommonCrypto/CommonDigest.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -34,13 +33,6 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
-#define MD5_DIGEST_LENGTH CC_MD5_DIGEST_LENGTH
-#define MD5_CTX CC_MD5_CTX
-#define MD5_Init CC_MD5_Init
-#define MD5_Update CC_MD5_Update
-#define MD5_Final CC_MD5_Final
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #else
 // Windows equivalents
 #include <io.h>
@@ -1124,226 +1116,6 @@ static void send_reply(ei_x_buff *x, int fd) {
 }
 
 /*
- * Manual Erlang distribution handshake
- * Returns 0 on success, -1 on failure
- */
-static int manual_handshake(int fd, ErlConnect *con) {
-	unsigned char buf[1024];
-	ssize_t n;
-	int index = 0;
-	int version;
-	int type, arity;
-	char atom[256];
-	unsigned long challenge;
-	unsigned char digest[MD5_DIGEST_LENGTH];
-	MD5_CTX ctx;
-	unsigned char cookie_digest[MD5_DIGEST_LENGTH];
-	char status_msg[2];
-
-	printf("Godot CNode: Starting manual handshake on fd: %d\n", fd);
-
-	/* Step 1: Read length prefix (4 bytes, big-endian) */
-	/* Note: Erlang distribution protocol uses length-prefixed messages */
-	unsigned char len_buf[4];
-
-	/* Use recv() instead of read() for socket operations */
-	/* Wait a moment for the client to send data */
-	fd_set read_fds;
-	struct timeval timeout;
-	FD_ZERO(&read_fds);
-	FD_SET(fd, &read_fds);
-	timeout.tv_sec = 5;
-	timeout.tv_usec = 0;
-	int select_result = select(fd + 1, &read_fds, NULL, NULL, &timeout);
-
-	if (select_result <= 0) {
-		fprintf(stderr, "Godot CNode: select() failed or timeout: %d, errno=%d (%s)\n", select_result, errno, strerror(errno));
-		return -1;
-	}
-
-	/* Check socket error state */
-	int socket_error = 0;
-	socklen_t error_len = sizeof(socket_error);
-	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 && socket_error != 0) {
-		fprintf(stderr, "Godot CNode: Socket error: %d (%s)\n", socket_error, strerror(socket_error));
-		return -1;
-	}
-
-	printf("Godot CNode: Waiting for data from client (select returned %d)...\n", select_result);
-
-	/* Try to peek at available data first */
-	int available = 0;
-	if (ioctl(fd, FIONREAD, &available) == 0) {
-		printf("Godot CNode: Bytes available in socket buffer: %d\n", available);
-	}
-
-	n = recv(fd, len_buf, 4, MSG_PEEK); // Peek first to see what we have
-	if (n > 0) {
-		printf("Godot CNode: Peeked %zd bytes: 0x%02x 0x%02x 0x%02x 0x%02x\n", n, len_buf[0], len_buf[1], len_buf[2], len_buf[3]);
-	}
-
-	/* Now actually read the length prefix */
-	n = recv(fd, len_buf, 4, 0);
-	if (n != 4) {
-		int saved_errno = errno;
-		fprintf(stderr, "Godot CNode: Failed to recv length prefix: %zd bytes (expected 4), errno=%d (%s)\n", n, saved_errno, strerror(saved_errno));
-		if (n == 0) {
-			fprintf(stderr, "Godot CNode: Connection closed by peer (no data received)\n");
-		} else if (n > 0) {
-			fprintf(stderr, "Godot CNode: Partial read: got %zd bytes, showing first bytes: ", n);
-			for (int i = 0; i < n && i < 4; i++) {
-				fprintf(stderr, "0x%02x ", len_buf[i]);
-			}
-			fprintf(stderr, "\n");
-		}
-		return -1;
-	}
-
-	printf("Godot CNode: Received length prefix: 0x%02x 0x%02x 0x%02x 0x%02x\n", len_buf[0], len_buf[1], len_buf[2], len_buf[3]);
-	uint32_t msg_len = (uint32_t)len_buf[0] << 24 | (uint32_t)len_buf[1] << 16 |
-			(uint32_t)len_buf[2] << 8 | (uint32_t)len_buf[3];
-	printf("Godot CNode: Name message length: %u bytes\n", msg_len);
-
-	if (msg_len > sizeof(buf)) {
-		fprintf(stderr, "Godot CNode: Message too large: %u bytes (max %zu)\n", msg_len, sizeof(buf));
-		return -1;
-	}
-
-	/* Step 2: Read the actual name message */
-	n = recv(fd, buf, msg_len, 0);
-	if (n != (ssize_t)msg_len) {
-		fprintf(stderr, "Godot CNode: Failed to recv name message: %zd bytes (expected %u), errno=%d (%s)\n", n, msg_len, errno, strerror(errno));
-		return -1;
-	}
-
-	index = 0;
-	if (ei_decode_version((const char *)buf, &index, &version) < 0) {
-		fprintf(stderr, "Godot CNode: Failed to decode version\n");
-		return -1;
-	}
-
-	if (buf[index] != 'n') {
-		fprintf(stderr, "Godot CNode: Expected 'n' tag, got: 0x%02x\n", buf[index]);
-		return -1;
-	}
-	index++;
-
-	/* Read flags (1 byte) */
-	unsigned char flags = buf[index++];
-
-	/* Read node name */
-	int name_len = 0;
-	while (index < (int)msg_len && buf[index] != '\0' && name_len < sizeof(con->nodename) - 1) {
-		con->nodename[name_len++] = buf[index++];
-	}
-	con->nodename[name_len] = '\0';
-
-	printf("Godot CNode: Received name message: version=%d, flags=0x%02x, node=%s\n", version, flags, con->nodename);
-
-	/* Step 3: Send status 'ok' with length prefix */
-	status_msg[0] = 's';
-	status_msg[1] = 'o'; // 'o' = ok, 'n' = nok
-	uint32_t status_len = htonl(2);
-	n = send(fd, &status_len, 4, 0);
-	if (n != 4) {
-		fprintf(stderr, "Godot CNode: Failed to send status length: %s\n", strerror(errno));
-		return -1;
-	}
-	n = send(fd, status_msg, 2, 0);
-	if (n != 2) {
-		fprintf(stderr, "Godot CNode: Failed to send status: %s\n", strerror(errno));
-		return -1;
-	}
-
-	/* Step 4: Generate and send challenge with length prefix */
-	challenge = (unsigned long)time(NULL) ^ (unsigned long)getpid();
-	unsigned char challenge_msg[5];
-	challenge_msg[0] = 'n';
-	*(unsigned long *)(challenge_msg + 1) = htonl((unsigned long)challenge);
-	uint32_t challenge_len = htonl(5);
-	n = send(fd, &challenge_len, 4, 0);
-	if (n != 4) {
-		fprintf(stderr, "Godot CNode: Failed to send challenge length: %s\n", strerror(errno));
-		return -1;
-	}
-	n = send(fd, challenge_msg, 5, 0);
-	if (n != 5) {
-		fprintf(stderr, "Godot CNode: Failed to send challenge: %s\n", strerror(errno));
-		return -1;
-	}
-	printf("Godot CNode: Sent challenge: %lu\n", challenge);
-
-	/* Step 5: Receive challenge reply length prefix */
-	n = recv(fd, len_buf, 4, 0);
-	if (n != 4) {
-		fprintf(stderr, "Godot CNode: Failed to recv challenge reply length: %zd bytes, errno=%d (%s)\n", n, errno, strerror(errno));
-		return -1;
-	}
-	msg_len = (uint32_t)len_buf[0] << 24 | (uint32_t)len_buf[1] << 16 |
-			(uint32_t)len_buf[2] << 8 | (uint32_t)len_buf[3];
-
-	/* Step 6: Receive challenge reply */
-	n = recv(fd, buf, msg_len, 0);
-	if (n != (ssize_t)msg_len) {
-		fprintf(stderr, "Godot CNode: Failed to recv challenge reply: %zd bytes (expected %u), errno=%d (%s)\n", n, msg_len, errno, strerror(errno));
-		return -1;
-	}
-	if (msg_len < MD5_DIGEST_LENGTH + 1) {
-		fprintf(stderr, "Godot CNode: Challenge reply too short: %u bytes\n", msg_len);
-		return -1;
-	}
-
-	if (buf[0] != 'r') {
-		fprintf(stderr, "Godot CNode: Expected 'r' tag, got: 0x%02x\n", buf[0]);
-		return -1;
-	}
-
-	memcpy(digest, buf + 1, MD5_DIGEST_LENGTH);
-
-	/* Step 7: Verify cookie */
-	MD5_Init(&ctx);
-	MD5_Update(&ctx, ec.ei_connect_cookie, strlen(ec.ei_connect_cookie));
-	char challenge_str[32];
-	snprintf(challenge_str, sizeof(challenge_str), "%lu", challenge);
-	MD5_Update(&ctx, challenge_str, strlen(challenge_str));
-	MD5_Final(cookie_digest, &ctx);
-
-	if (memcmp(digest, cookie_digest, MD5_DIGEST_LENGTH) != 0) {
-		fprintf(stderr, "Godot CNode: Cookie verification failed\n");
-		return -1;
-	}
-
-	printf("Godot CNode: Cookie verified successfully\n");
-
-	/* Step 8: Generate and send challenge acknowledgment with length prefix */
-	unsigned long our_challenge = (unsigned long)time(NULL) ^ (unsigned long)getpid() ^ 0x12345678;
-	MD5_Init(&ctx);
-	MD5_Update(&ctx, ec.ei_connect_cookie, strlen(ec.ei_connect_cookie));
-	snprintf(challenge_str, sizeof(challenge_str), "%lu", our_challenge);
-	MD5_Update(&ctx, challenge_str, strlen(challenge_str));
-	MD5_Final(cookie_digest, &ctx);
-
-	unsigned char ack_msg[1 + MD5_DIGEST_LENGTH];
-	ack_msg[0] = 'a';
-	memcpy(ack_msg + 1, cookie_digest, MD5_DIGEST_LENGTH);
-	uint32_t ack_len = htonl(1 + MD5_DIGEST_LENGTH);
-	n = send(fd, &ack_len, 4, 0);
-	if (n != 4) {
-		fprintf(stderr, "Godot CNode: Failed to send challenge ack length: %s\n", strerror(errno));
-		return -1;
-	}
-	n = send(fd, ack_msg, 1 + MD5_DIGEST_LENGTH, 0);
-	if (n != 1 + MD5_DIGEST_LENGTH) {
-		fprintf(stderr, "Godot CNode: Failed to send challenge ack: %s\n", strerror(errno));
-		return -1;
-	}
-
-	printf("Godot CNode: Handshake completed successfully\n");
-	return 0;
-}
-#pragma clang diagnostic pop
-
-/*
  * Main loop - listen for messages from Erlang/Elixir
  */
 extern "C" {
@@ -1372,7 +1144,7 @@ void main_loop() {
 
 		/* Accept connection from Erlang/Elixir node */
 		/* Use blocking ei_accept - this is the standard way for CNode servers */
-		/* Pass a valid ErlConnect structure (can be NULL, but some implementations prefer it) */
+		/* ei_accept() handles the Erlang distribution protocol handshake automatically */
 		static int accept_attempts = 0;
 		accept_attempts++;
 		if (accept_attempts == 1 || accept_attempts % 10 == 0) {
@@ -1412,20 +1184,19 @@ void main_loop() {
 			}
 		}
 
-		/* Use accept() instead of ei_accept() to work around macOS issue */
-		/* ei_accept() fails with "Protocol not available" (errno 42) on macOS */
+		/* Use ei_accept() - standard erl_interface approach for CNode servers */
+		/* ei_accept() handles the Erlang distribution protocol handshake automatically */
 		if (accept_attempts == 1 || accept_attempts % 10 == 0) {
-			printf("Godot CNode: Calling accept() (blocking, waiting for connection)...\n");
+			printf("Godot CNode: Calling ei_accept() (blocking, waiting for connection)...\n");
 			fflush(stdout);
 		}
 
-		struct sockaddr_in client_addr;
-		socklen_t client_addr_len = sizeof(client_addr);
-		fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_addr_len);
+		ErlConnect con;
+		fd = ei_accept(&ec, listen_fd, &con);
 
 		if (fd < 0) {
 			int saved_errno = errno;
-			fprintf(stderr, "Godot CNode: accept() failed: fd=%d, errno=%d (%s)\n", fd, saved_errno, strerror(saved_errno));
+			fprintf(stderr, "Godot CNode: ei_accept() failed: %d (errno: %d, %s)\n", fd, saved_errno, strerror(saved_errno));
 
 			/* Handle specific error codes */
 			if (saved_errno == EBADF || saved_errno == 9) {
@@ -1441,27 +1212,15 @@ void main_loop() {
 			} else if (saved_errno == EINTR) {
 				/* Interrupted by signal - retry */
 				if (accept_attempts % 10 == 0) {
-					printf("Godot CNode: accept() interrupted, retrying...\n");
+					printf("Godot CNode: ei_accept() interrupted, retrying...\n");
 				}
 				continue;
 			} else {
 				/* Other error - log details and retry after short delay */
-				fprintf(stderr, "Godot CNode: accept() error (errno: %d, %s), retrying after 100ms...\n", saved_errno, strerror(saved_errno));
+				fprintf(stderr, "Godot CNode: ei_accept() error (errno: %d, %s), retrying after 100ms...\n", saved_errno, strerror(saved_errno));
 				usleep(100000); // 100ms before retry
 				continue;
 			}
-		}
-
-		printf("Godot CNode: accept() succeeded: fd=%d\n", fd);
-
-		/* Perform manual Erlang distribution handshake */
-		ErlConnect con;
-		memset(&con, 0, sizeof(ErlConnect));
-
-		if (manual_handshake(fd, &con) < 0) {
-			fprintf(stderr, "Godot CNode: Handshake failed, closing connection\n");
-			close(fd);
-			continue;
 		}
 
 		printf("Godot CNode: ✓ Accepted connection on fd: %d\n", fd);
