@@ -42,49 +42,60 @@ This GDExtension allows Erlang/Elixir nodes to communicate with Godot using the 
 
 ## Architecture
 
-The CNode runs in a background thread and communicates with the current Godot instance. It provides RPC functions to:
-- Access the SceneTree
-- Find nodes by path
-- Get/set node properties
-- Call node methods
-- Discover Godot's API dynamically using ClassDB
-- Access singletons
-- Work with any Object (not just Nodes)
-- Convert between Godot Variants and Erlang BERT format
+The CNode runs in a background thread and communicates with the current Godot instance. It provides a GenServer-like API (implemented in pure C/C++) that exposes the entire Godot API dynamically. The implementation:
 
-The API discovery system is inspired by the godot-sandbox project's runtime API generation, but adapted for Erlang/Elixir communication over CNode instead of sandboxed programs.
+- **GenServer-style calls**: Synchronous operations via `{call, Module, Function, Args}`
+- **GenServer-style casts**: Asynchronous operations via `{cast, Module, Function, Args}`
+- **Dynamic API discovery**: Uses ClassDB to discover and call any Godot class, method, or property
+- **Object management**: Track and operate on any Godot Object by instance ID
+- **Singleton access**: Access any Godot singleton dynamically
+- **Type conversion**: Automatic conversion between Godot Variants and Erlang BERT format
+
+The API discovery system is inspired by the godot-sandbox project's runtime API generation, but adapted for Erlang/Elixir communication over CNode instead of sandboxed programs. The GenServer API pattern is inspired by bug-free-octo-parakeet but implemented entirely in C/C++ within the CNode.
 
 ## API
 
-### Basic RPC Calls
+The CNode **only** exposes GenServer-style APIs. All access to Godot must go through the GenServer pattern: `{call, Module, Function, Args}` for synchronous operations and `{cast, Module, Function, Args}` for asynchronous operations.
 
-- `ping` - Returns "pong" for connectivity testing
-- `godot_version` - Returns Godot version string
+### GenServer-style API (Pure C/C++)
 
-### Scene Tree & Node Operations
+The CNode implements a GenServer-like API pattern entirely in C/C++. This allows calling any Godot API dynamically:
 
-- `get_scene_tree_root` - Returns the root node of the scene tree
-- `find_node` - Finds a node by path string
-- `get_node_property` - Gets a property value from a node
-- `set_node_property` - Sets a property value on a node
-- `call_node_method` - Calls a method on a node with arguments
+**Synchronous Calls** (`{call, Module, Function, Args}`):
+- `{call, godot, call_method, [ObjectID, MethodName, Args]}` - Call any method on any object
+- `{call, godot, get_property, [ObjectID, PropertyName]}` - Get any property from any object
+- `{call, godot, set_property, [ObjectID, PropertyName, Value]}` - Set any property on any object
+- `{call, godot, get_singleton, [SingletonName]}` - Get any singleton by name
+- `{call, godot, create_object, [ClassName]}` - Create an instance of any class
+- `{call, godot, list_classes, []}` - List all registered Godot classes
+- `{call, godot, get_class_methods, [ClassName]}` - Get methods for a class
+- `{call, godot, get_class_properties, [ClassName]}` - Get properties for a class
+- `{call, godot, get_singletons, []}` - List all singleton names
+- `{call, godot, get_scene_tree_root, []}` - Get the root node of the scene tree
+- `{call, godot, find_node, [NodePath]}` - Find a node by path string
 
-### ClassDB API Discovery
+**Asynchronous Casts** (`{cast, Module, Function, Args}`):
+- `{cast, godot, call_method, [ObjectID, MethodName, Args]}` - Call method asynchronously
+- `{cast, godot, set_property, [ObjectID, PropertyName, Value]}` - Set property asynchronously
 
-- `list_classes` - Returns a list of all registered Godot classes
-- `get_class_methods` - Returns methods for a given class name
-- `get_class_properties` - Returns properties for a given class name
+**Example Usage from Elixir**:
+```elixir
+# Connect to CNode
+Node.connect(:"godot@127.0.0.1")
 
-### Singleton Access
+# Synchronous call via GenServer pattern
+GenServer.call(pid, {:call, :godot, :get_singleton, ["SceneTree"]})
 
-- `get_singletons` - Returns a list of all singleton names
-- `get_singleton` - Gets a singleton object by name
+# Asynchronous cast
+GenServer.cast(pid, {:cast, :godot, :set_property, [object_id, "position", Vector3.new(1, 2, 3)]})
 
-### Generic Object Operations
+# Call any method on any object
+GenServer.call(pid, {:call, :godot, :call_method, [node_id, "get_position", []]})
 
-- `call_object_method` - Calls a method on any Object (not just Node) by instance ID
-- `get_object_property` - Gets a property from any Object by instance ID
-- `set_object_property` - Sets a property on any Object by instance ID
+# Discover API dynamically
+GenServer.call(pid, {:call, :godot, :list_classes, []})
+GenServer.call(pid, {:call, :godot, :get_class_methods, ["Node"]})
+```
 
 ## License
 
