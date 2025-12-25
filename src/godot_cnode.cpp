@@ -355,9 +355,9 @@ int next_instance_id = 1;
 
 /* Forward declarations */
 static int process_message(char *buf, int *index, int fd);
-static int handle_call(char *buf, int *index, int fd);
+static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erlang_ref *tag_ref);
 static int handle_cast(char *buf, int *index);
-static void send_reply(ei_x_buff *x, int fd);
+static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag_ref);
 
 /* Custom socket callbacks for macOS compatibility */
 /* macOS doesn't support SO_ACCEPTCONN, so we need a custom accept implementation */
@@ -709,16 +709,16 @@ static int process_message(char *buf, int *index, int fd) {
 		return -1;
 	}
 
-	/* Handle GenServer-style messages for backward compatibility */
+	/* Handle GenServer-style messages for synchronous RPC calls (with replies) */
 	if (strcmp(atom, "$gen_call") == 0) {
-		/* GenServer call: {'$gen_call', {From, Tag}, Request} */
+		/* GenServer call: {'$gen_call', {From, Tag}, Request} - synchronous with reply */
 		// Decode the From tuple {From, Tag}
 		int from_arity;
 		if (ei_decode_tuple_header(buf, index, &from_arity) < 0 || from_arity != 2) {
 			fprintf(stderr, "Error decoding From tuple in gen_call\n");
 			return -1;
 		}
-		// Skip From (PID) and Tag (reference) - we don't need them for CNode
+		// Decode From (PID) and Tag (reference) for sending reply
 		erlang_pid from_pid;
 		erlang_ref tag_ref;
 		if (ei_decode_pid(buf, index, &from_pid) < 0) {
@@ -729,19 +729,20 @@ static int process_message(char *buf, int *index, int fd) {
 			fprintf(stderr, "Error decoding Tag in gen_call\n");
 			return -1;
 		}
-		// Now decode the Request tuple {Module, Function, Args}
-		return handle_call(buf, index, fd);
+		// Now decode the Request tuple {Module, Function, Args} and handle with reply
+		printf("Godot CNode: Received GenServer call (synchronous RPC with reply)\n");
+		return handle_call(buf, index, fd, &from_pid, &tag_ref);
 	} else if (strcmp(atom, "$gen_cast") == 0) {
-		/* GenServer cast: {'$gen_cast', Request} */
+		/* GenServer cast: {'$gen_cast', Request} - asynchronous, no reply */
 		// Request is directly after the atom, which is {Module, Function, Args}
 		return handle_cast(buf, index);
 	} else {
-		/* Handle plain RPC calls: {Module, Function, Args} */
-		/* Reset to before tuple header (after version) so handle_call can decode it */
+		/* Handle plain messages: {Module, Function, Args} - asynchronous, no reply */
+		/* Reset to before tuple header (after version) so handle_cast can decode it */
 		*index = saved_index;
-		printf("Godot CNode: Received plain RPC call: {Module, Function, Args} format\n");
-		// handle_call will decode the tuple header and elements
-		return handle_call(buf, index, fd);
+		printf("Godot CNode: Received plain message (asynchronous, no reply)\n");
+		// handle_cast will decode the tuple header and elements
+		return handle_cast(buf, index);
 	}
 }
 
@@ -820,9 +821,9 @@ static void encode_property_info(const Dictionary &property, ei_x_buff *x) {
 }
 
 /*
- * Handle synchronous call from Erlang/Elixir
+ * Handle synchronous call from Erlang/Elixir (GenServer-style with reply)
  */
-static int handle_call(char *buf, int *index, int fd) {
+static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erlang_ref *tag_ref) {
 	// Guard: Check for null pointers
 	if (buf == nullptr || index == nullptr) {
 		fprintf(stderr, "Error: null pointer in handle_call\n");
@@ -847,7 +848,7 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_request_format");
-		send_reply(&reply, fd);
+		send_reply(&reply, fd, from_pid, tag_ref);
 		ei_x_free(&reply);
 		return -1;
 	}
@@ -860,7 +861,7 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_module");
-		send_reply(&reply, fd);
+		send_reply(&reply, fd, from_pid, tag_ref);
 		ei_x_free(&reply);
 		return -1;
 	}
@@ -869,7 +870,7 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_function");
-		send_reply(&reply, fd);
+		send_reply(&reply, fd, from_pid, tag_ref);
 		ei_x_free(&reply);
 		return -1;
 	}
@@ -1142,7 +1143,7 @@ static int handle_call(char *buf, int *index, int fd) {
 	}
 
 	/* Send GenServer-style reply */
-	send_reply(&reply, fd);
+	send_reply(&reply, fd, from_pid, tag_ref);
 	ei_x_free(&reply);
 
 	return 0;
@@ -1231,11 +1232,10 @@ static int handle_cast(char *buf, int *index) {
 }
 
 /*
- * Send reply to Erlang/Elixir
- * Note: Plain RPC calls are fire-and-forget, so replies are not sent for them.
- * Only GenServer-style calls ($gen_call) send replies.
+ * Send reply to Erlang/Elixir (GenServer-style synchronous call)
+ * Sends reply in format: {Tag, Reply} to the From PID
  */
-static void send_reply(ei_x_buff *x, int fd) {
+static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag_ref) {
 	// Guard: Check for null pointer
 	if (x == nullptr) {
 		fprintf(stderr, "Error: null reply buffer in send_reply\n");
@@ -1248,10 +1248,34 @@ static void send_reply(ei_x_buff *x, int fd) {
 		return;
 	}
 
-	/* For plain RPC calls, replies are not sent (fire-and-forget) */
-	/* GenServer-style calls would need a PID to send replies, which we don't have for plain messages */
-	/* TODO: Implement proper reply mechanism for synchronous calls if needed */
-	printf("Godot CNode: Reply prepared but not sent (plain RPC calls are fire-and-forget)\n");
+	// Guard: Check for valid PID and tag
+	if (to_pid == nullptr || tag_ref == nullptr) {
+		fprintf(stderr, "Error: null PID or tag in send_reply\n");
+		return;
+	}
+
+	/* Encode GenServer-style reply: {Tag, Reply} */
+	/* The reply buffer (x) already contains the reply data, we need to wrap it with the tag */
+	ei_x_buff gen_reply;
+	ei_x_new(&gen_reply);
+
+	/* Encode tuple header for {Tag, Reply} */
+	ei_x_encode_tuple_header(&gen_reply, 2);
+
+	/* Encode the tag (reference) */
+	ei_x_encode_ref(&gen_reply, tag_ref);
+
+	/* Append the reply data (which is already encoded in x) */
+	ei_x_append_buf(&gen_reply, x->buff, x->index);
+
+	/* Send the GenServer-style reply to the From PID */
+	if (ei_send_encoded(fd, to_pid, gen_reply.buff, gen_reply.index) < 0) {
+		fprintf(stderr, "Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
+	} else {
+		printf("Godot CNode: Reply sent successfully (GenServer format)\n");
+	}
+
+	ei_x_free(&gen_reply);
 }
 
 /*
