@@ -1210,7 +1210,18 @@ static int handle_cast(char *buf, int *index) {
 	}
 
 	// Route based on module (async, no reply)
-	if (strcmp(module, "godot") == 0) {
+	printf("Godot CNode: Processing async message - Module: %s, Function: %s\n", module, function);
+	fflush(stdout);
+
+	if (strcmp(module, "erlang") == 0) {
+		if (strcmp(function, "node") == 0) {
+			printf("Godot CNode: Async erlang:node - Node name: %s\n", ec.thisnodename);
+		} else if (strcmp(function, "nodes") == 0) {
+			printf("Godot CNode: Async erlang:nodes - No other connected nodes\n");
+		} else {
+			printf("Godot CNode: Async erlang:%s - Unknown function\n", function);
+		}
+	} else if (strcmp(module, "godot") == 0) {
 		if (strcmp(function, "call_method") == 0) {
 			// {cast, godot, call_method, [ObjectID, MethodName, Args]}
 			if (args.size() >= 2) {
@@ -1226,9 +1237,17 @@ static int handle_cast(char *buf, int *index) {
 
 					Object *obj = get_object_by_id(object_id);
 					if (obj != nullptr) {
+						printf("Godot CNode: Async godot:call_method - ObjectID: %lld, Method: %s\n", object_id, method_name.utf8().get_data());
 						obj->callv(method_name, method_args);
+						printf("Godot CNode: Async godot:call_method - Success\n");
+					} else {
+						printf("Godot CNode: Async godot:call_method - Error: Object not found (ID: %lld)\n", object_id);
 					}
+				} else {
+					printf("Godot CNode: Async godot:call_method - Error: Invalid arguments\n");
 				}
+			} else {
+				printf("Godot CNode: Async godot:call_method - Error: Insufficient arguments\n");
 			}
 		} else if (strcmp(function, "set_property") == 0) {
 			// {cast, godot, set_property, [ObjectID, PropertyName, Value]}
@@ -1241,13 +1260,27 @@ static int handle_cast(char *buf, int *index) {
 				if (object_id != 0 && !prop_name.is_empty()) {
 					Object *obj = get_object_by_id(object_id);
 					if (obj != nullptr) {
+						printf("Godot CNode: Async godot:set_property - ObjectID: %lld, Property: %s\n", object_id, prop_name.utf8().get_data());
 						obj->set(prop_name, value);
+						printf("Godot CNode: Async godot:set_property - Success\n");
+					} else {
+						printf("Godot CNode: Async godot:set_property - Error: Object not found (ID: %lld)\n", object_id);
 					}
+				} else {
+					printf("Godot CNode: Async godot:set_property - Error: Invalid arguments\n");
 				}
+			} else {
+				printf("Godot CNode: Async godot:set_property - Error: Insufficient arguments\n");
 			}
+		} else {
+			printf("Godot CNode: Async godot:%s - Unknown function\n", function);
 		}
+	} else {
+		printf("Godot CNode: Async %s:%s - Unknown module\n", module, function);
 	}
 
+	printf("Godot CNode: Async message processing complete\n");
+	fflush(stdout);
 	return 0;
 }
 
@@ -1289,8 +1322,9 @@ static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag
 	ei_x_append_buf(&gen_reply, x->buff, x->index);
 
 	/* Send the GenServer-style reply to the From PID */
-	/* Use ei_send_encoded to send to a specific PID on the connected socket */
-	if (ei_send_encoded(fd, to_pid, gen_reply.buff, gen_reply.index) < 0) {
+	/* Use ei_send to send to a specific PID on the connected socket */
+	/* Format: ei_send(fd, pid, buf, len) */
+	if (ei_send(fd, to_pid, gen_reply.buff, gen_reply.index) < 0) {
 		fprintf(stderr, "Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
 	} else {
 		printf("Godot CNode: Reply sent successfully (GenServer format)\n");
@@ -1374,16 +1408,20 @@ void main_loop() {
 		}
 
 		printf("Godot CNode: ✓ Accepted connection on fd: %d\n", fd);
+		fflush(stdout);
 		if (con.nodename[0] != '\0') {
 			printf("Godot CNode: Connected from node: %s\n", con.nodename);
 		} else {
 			printf("Godot CNode: Connected from node: (nodename not provided)\n");
 		}
+		fflush(stdout);
 
 		/* Receive message */
 		printf("Godot CNode: Waiting to receive message from fd: %d...\n", fd);
+		fflush(stdout);
 		res = ei_receive_msg(fd, &msg, &x);
 		printf("Godot CNode: ei_receive_msg returned: %d", res);
+		fflush(stdout);
 
 		if (res == ERL_TICK) {
 			/* Just a tick, continue */
@@ -1392,20 +1430,46 @@ void main_loop() {
 		} else if (res == ERL_ERROR) {
 			int saved_errno = errno;
 			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", saved_errno, strerror(saved_errno));
-			/* macOS issue: errno 42 (Protocol not available) - data may still be in buffer */
+			/* macOS issue: errno 42 (Protocol not available) - try to process from existing buffer */
 			if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
-				/* Try to process message anyway if buffer has data */
+				/* Try to process message from existing buffer if it has data */
+				printf("Godot CNode: Buffer index: %d, attempting to process message despite errno 42\n", x.index);
+				fflush(stdout);
 				if (x.index > 0) {
 					printf("Godot CNode: Attempting to process message despite errno 42 (macOS compatibility)\n");
+					fflush(stdout);
 					/* Process the message from buffer */
 					x.index = 0;
 					if (process_message(x.buff, &x.index, fd) < 0) {
 						fprintf(stderr, "Error processing message\n");
 					}
+					ei_x_free(&x);
 					close(fd);
 					continue;
+				} else {
+					/* Buffer is empty, try to read raw data from socket */
+					printf("Godot CNode: Buffer is empty, attempting raw socket read...\n");
+					fflush(stdout);
+					unsigned char raw_buf[4096];
+					ssize_t bytes_read = read(fd, raw_buf, sizeof(raw_buf));
+					if (bytes_read > 0) {
+						printf("Godot CNode: Read %zd bytes from socket, attempting to decode...\n", bytes_read);
+						fflush(stdout);
+						ei_x_buff raw_x;
+						ei_x_new_with_version(&raw_x);
+						ei_x_append_buf(&raw_x, (const char *)raw_buf, (int)bytes_read);
+						raw_x.index = 0;
+						if (process_message(raw_x.buff, &raw_x.index, fd) < 0) {
+							fprintf(stderr, "Error processing message from raw read\n");
+						}
+						ei_x_free(&raw_x);
+					} else {
+						printf("Godot CNode: Raw read failed (bytes_read: %zd)\n", bytes_read);
+						fflush(stdout);
+					}
 				}
 			}
+			ei_x_free(&x);
 			close(fd);
 			continue;
 		} else {
