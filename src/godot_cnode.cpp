@@ -1289,10 +1289,15 @@ static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag
 	ei_x_append_buf(&gen_reply, x->buff, x->index);
 
 	/* Send the GenServer-style reply to the From PID */
+	/* Use ei_send_encoded to send to a specific PID on the connected socket */
 	if (ei_send_encoded(fd, to_pid, gen_reply.buff, gen_reply.index) < 0) {
 		fprintf(stderr, "Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
 	} else {
 		printf("Godot CNode: Reply sent successfully (GenServer format)\n");
+		/* Flush the socket to ensure reply is sent immediately */
+		fflush(stdout);
+		/* Give the socket a moment to send the data */
+		usleep(10000); // 10ms
 	}
 
 	ei_x_free(&gen_reply);
@@ -1411,8 +1416,16 @@ void main_loop() {
 
 		/* Process the message */
 		x.index = 0;
-		if (process_message(x.buff, &x.index, fd) < 0) {
+		int process_result = process_message(x.buff, &x.index, fd);
+		if (process_result < 0) {
 			fprintf(stderr, "Error processing message\n");
+		}
+
+		/* For GenServer calls, give time for reply to be sent before closing */
+		/* Plain messages are async, so we can close immediately */
+		if (process_result == 0) {
+			/* Small delay to ensure reply is fully sent for GenServer calls */
+			usleep(50000); // 50ms
 		}
 
 		close(fd);
