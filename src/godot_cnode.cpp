@@ -695,8 +695,7 @@ static int handle_call(char *buf, int *index, int fd) {
 					ei_x_encode_atom(&reply, "error");
 					ei_x_encode_string(&reply, "singleton_not_found");
 				} else {
-					void *binding = internal::gdextension_interface_object_get_instance_binding(singleton_obj, internal::token, &Object::_gde_binding_callbacks);
-					Object *singleton = reinterpret_cast<Object *>(binding);
+					Object *singleton = internal::get_object_instance_binding(singleton_obj);
 					if (singleton == nullptr) {
 						ei_x_encode_tuple_header(&reply, 2);
 						ei_x_encode_atom(&reply, "error");
