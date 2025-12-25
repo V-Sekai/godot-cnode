@@ -72,6 +72,12 @@ jobs:
         run: |
           choco install erlang -y
 
+      - name: Setup MinGW for Windows
+        if: ${{ matrix.target.platform == 'windows' }}
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          version: 12.2.0
+
       # Build GDExtension
       - name: 🔗 GDExtension Build
         uses: godotengine/godot-cpp-template/.github/actions/build@f9564a9c8115139b9624692d39e358291f6d76ce
@@ -81,6 +87,7 @@ jobs:
           gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
+          windows-compiler: ${{ matrix.target.platform == 'windows' && 'mingw' || 'msvc' }}
 
       # Mac Sign (only for macOS on main branch)
       - name: Set macOS precision extension
@@ -166,6 +173,12 @@ jobs:
         run: |
           choco install erlang -y
 
+      - name: Setup MinGW for Windows
+        if: ${{ matrix.target.platform == 'windows' }}
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          version: 12.2.0
+
       # Build GDExtension
       - name: 🔗 GDExtension Build
         uses: godotengine/godot-cpp-template/.github/actions/build@f9564a9c8115139b9624692d39e358291f6d76ce
@@ -175,6 +188,7 @@ jobs:
           gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
+          windows-compiler: ${{ matrix.target.platform == 'windows' && 'mingw' || 'msvc' }}
 
       # Mac Sign (only for macOS on main branch)
       - name: Set macOS precision extension
