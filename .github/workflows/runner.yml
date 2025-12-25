@@ -81,7 +81,7 @@ jobs:
         with:
           platform: ${{ matrix.target.platform }}
           arch: ${{ matrix.target.arch }}
-          godot-cpp-location: thirdparty/godot-cpp
+          gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
 
@@ -177,7 +177,7 @@ jobs:
         with:
           platform: ${{ matrix.target.platform }}
           arch: ${{ matrix.target.arch }}
-          godot-cpp-location: thirdparty/godot-cpp
+          gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
 
