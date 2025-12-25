@@ -692,6 +692,10 @@ bool Basis::is_equal_approx(const Basis &p_basis) const {
 	return rows[0].is_equal_approx(p_basis.rows[0]) && rows[1].is_equal_approx(p_basis.rows[1]) && rows[2].is_equal_approx(p_basis.rows[2]);
 }
 
+bool Basis::is_finite() const {
+	return rows[0].is_finite() && rows[1].is_finite() && rows[2].is_finite();
+}
+
 bool Basis::operator==(const Basis &p_matrix) const {
 	for (int i = 0; i < 3; i++) {
 		for (int j = 0; j < 3; j++) {
@@ -812,7 +816,7 @@ void Basis::get_axis_angle(Vector3 &r_axis, real_t &r_angle) const {
 		return;
 	}
 	// As we have reached here there are no singularities so we can handle normally.
-	double s = Math::sqrt((rows[2][1] - rows[1][2]) * (rows[2][1] - rows[1][2]) + (rows[0][2] - rows[2][0]) * (rows[0][2] - rows[2][0]) + (rows[1][0] - rows[0][1]) * (rows[1][0] - rows[0][1])); // Used to normalise.
+	double s = Math::sqrt((rows[2][1] - rows[1][2]) * (rows[2][1] - rows[1][2]) + (rows[0][2] - rows[2][0]) * (rows[0][2] - rows[2][0]) + (rows[1][0] - rows[0][1]) * (rows[1][0] - rows[0][1])); // Used to normalize.
 
 	if (Math::abs(s) < CMP_EPSILON) {
 		// Prevent divide by zero, should not happen if matrix is orthogonal and should be caught by singularity test above.
@@ -1033,12 +1037,15 @@ void Basis::rotate_sh(real_t *p_values) {
 	p_values[8] = d4 * s_scale_dst4;
 }
 
-Basis Basis::looking_at(const Vector3 &p_target, const Vector3 &p_up) {
+Basis Basis::looking_at(const Vector3 &p_target, const Vector3 &p_up, bool p_use_model_front) {
 #ifdef MATH_CHECKS
 	ERR_FAIL_COND_V_MSG(p_target.is_zero_approx(), Basis(), "The target vector can't be zero.");
 	ERR_FAIL_COND_V_MSG(p_up.is_zero_approx(), Basis(), "The up vector can't be zero.");
 #endif
-	Vector3 v_z = -p_target.normalized();
+	Vector3 v_z = p_target.normalized();
+	if (!p_use_model_front) {
+		v_z = -v_z;
+	}
 	Vector3 v_x = p_up.cross(v_z);
 #ifdef MATH_CHECKS
 	ERR_FAIL_COND_V_MSG(v_x.is_zero_approx(), Basis(), "The target vector and up vector can't be parallel to each other.");

@@ -39,7 +39,7 @@ namespace godot {
 
 class String;
 
-struct _NO_DISCARD_ Transform2D {
+struct [[nodiscard]] Transform2D {
 	// Warning #1: basis of Transform2D is stored differently from Basis. In terms of columns array, the basis matrix looks like "on paper":
 	// M = (columns[0][0] columns[1][0])
 	//     (columns[0][1] columns[1][1])
@@ -99,6 +99,7 @@ struct _NO_DISCARD_ Transform2D {
 	void orthonormalize();
 	Transform2D orthonormalized() const;
 	bool is_equal_approx(const Transform2D &p_transform) const;
+	bool is_finite() const;
 
 	Transform2D looking_at(const Vector2 &p_target) const;
 
