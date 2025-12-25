@@ -11,3 +11,24 @@
 bin/.godot
 bin/addons/godot_cnode/bin/
 *.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build artifacts
+*.framework/
+*.dylib
+*.dll
+*.so
+*.a
+*.lib
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
