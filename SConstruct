@@ -2,152 +2,161 @@
 import os
 import sys
 
+# Build godot-cpp first
 env = SConscript("thirdparty/godot-cpp/SConstruct")
 
+# CNode-specific defines
 env.Append(
     CPPDEFINES=[
         "HAVE_CONFIG_H",
-        "PACKAGE=",
-        "VERSION=",
-        "CPU_CLIPS_POSITIVE=0",
-        "CPU_CLIPS_NEGATIVE=0",
-        "WEBRTC_APM_DEBUG_DUMP=0",
-        "WHISPER_BUILD",
-        "GGML_BUILD",
-        "_GNU_SOURCE"
+        "_DARWIN_C_SOURCE",
+        "_POSIX_C_SOURCE=200112L",
     ]
 )
 
-env.Prepend(CPPPATH=["thirdparty", "include"])
+env.Prepend(CPPPATH=["thirdparty", "src"])
 env.Append(CPPPATH=["src/"])
-env.Append(CPPDEFINES=['WHISPER_SHARED', 'GGML_SHARED'])
-sources = [Glob("src/*.cpp")]
 
-sources.extend([
-    Glob("thirdparty/libsamplerate/src/*.c"),
-    Glob("thirdparty/whisper.cpp/*.c"),
-    Glob("thirdparty/whisper.cpp/whisper.cpp"),
-])
+# Erlang interface paths
+erl_interface_dir = "thirdparty/erl_interface"
+erl_include_dir = erl_interface_dir + "/include"
+erl_src_dir = erl_interface_dir + "/src"
 
-# Disable 32 bit narrowing error (Clang-specific flag)
-if env["platform"] == "macos" or env["platform"] == "ios":
-    env.Append(CCFLAGS=["-Wno-c++11-narrowing"])
+erl_include_paths = [
+    erl_include_dir,
+    erl_src_dir,
+    erl_src_dir + "/misc",
+    erl_src_dir + "/connect",
+    erl_src_dir + "/epmd",
+    erl_src_dir + "/encode",
+    erl_src_dir + "/decode",
+    erl_src_dir + "/global",
+    erl_src_dir + "/openssl/include",
+]
 
-if env["platform"] == "macos" or env["platform"] == "ios":
-    env.Append(LINKFLAGS=["-framework"])
-    env.Append(LINKFLAGS=["Foundation"])
-    env.Append(LINKFLAGS=["-framework"])
-    env.Append(LINKFLAGS=["Metal"])
-    env.Append(LINKFLAGS=["-framework"])
-    env.Append(LINKFLAGS=["MetalKit"])
-    env.Append(LINKFLAGS=["-framework"])
-    env.Append(LINKFLAGS=["Accelerate"])
-    env.Append(
-        CPPDEFINES=[
-            "GGML_USE_METAL",
-            # Debug logs
-            #"GGML_METAL_NDEBUG",
-            "GGML_USE_ACCELERATE",
-            "GGML_METAL_PATH_RESOURCES=.."
-        ]
-    )
-    sources.extend([
-        Glob("thirdparty/whisper.cpp/ggml-metal.m"),
-    ])
-elif env["platform"] == "web":
-    # Web platform doesn't support OpenCL/CLBlast, use CPU-only backend
-    pass
-else:
-    # CLBlast and OpenCL only on non-apple, non-web platforms
-    # Enable exceptions for CLBlast library which uses C++ exceptions
-    # Windows uses MSVC which requires /EHsc instead of -fexceptions
-    if env["platform"] == "windows":
-        env.Append(CCFLAGS=["/EHsc"])
-    else:
-        env.Append(CCFLAGS=["-fexceptions"])
-    sources.extend([
-        "thirdparty/whisper.cpp/ggml-opencl.cpp",
-    ])
+env.Prepend(CPPPATH=erl_include_paths)
 
-    env.Prepend(CPPPATH=["thirdparty/opencl_headers", "thirdparty/clblast/include", "thirdparty/clblast/src"])
-    env.Append(
-        CPPDEFINES=[
-        "GGML_USE_CLBLAST",
-        "OPENCL_API",
-        "USE_ICD_LOADER",
-        ]
-    )
+# Build erl_interface static library
+env_erl_interface = env.Clone()
+# Suppress warnings for erl_interface
+env_erl_interface.Append(CCFLAGS=["-w"])
 
-    env.Append(LIBPATH=["OpenCL-SDK/install/lib"])
+# List erl_interface source files
+erl_interface_sources = [
+    # Connect
+    erl_src_dir + "/connect/ei_connect.c",
+    erl_src_dir + "/connect/ei_resolve.c",
+    erl_src_dir + "/connect/eirecv.c",
+    erl_src_dir + "/connect/send.c",
+    erl_src_dir + "/connect/send_exit.c",
+    erl_src_dir + "/connect/send_reg.c",
+    # Decode
+    erl_src_dir + "/decode/decode_atom.c",
+    erl_src_dir + "/decode/decode_big.c",
+    erl_src_dir + "/decode/decode_bignum.c",
+    erl_src_dir + "/decode/decode_binary.c",
+    erl_src_dir + "/decode/decode_boolean.c",
+    erl_src_dir + "/decode/decode_char.c",
+    erl_src_dir + "/decode/decode_double.c",
+    erl_src_dir + "/decode/decode_fun.c",
+    erl_src_dir + "/decode/decode_intlist.c",
+    erl_src_dir + "/decode/decode_iodata.c",
+    erl_src_dir + "/decode/decode_list_header.c",
+    erl_src_dir + "/decode/decode_long.c",
+    erl_src_dir + "/decode/decode_longlong.c",
+    erl_src_dir + "/decode/decode_pid.c",
+    erl_src_dir + "/decode/decode_port.c",
+    erl_src_dir + "/decode/decode_ref.c",
+    erl_src_dir + "/decode/decode_skip.c",
+    erl_src_dir + "/decode/decode_string.c",
+    erl_src_dir + "/decode/decode_trace.c",
+    erl_src_dir + "/decode/decode_tuple_header.c",
+    erl_src_dir + "/decode/decode_ulong.c",
+    erl_src_dir + "/decode/decode_ulonglong.c",
+    erl_src_dir + "/decode/decode_version.c",
+    # Encode
+    erl_src_dir + "/encode/encode_atom.c",
+    erl_src_dir + "/encode/encode_big.c",
+    erl_src_dir + "/encode/encode_bignum.c",
+    erl_src_dir + "/encode/encode_binary.c",
+    erl_src_dir + "/encode/encode_boolean.c",
+    erl_src_dir + "/encode/encode_char.c",
+    erl_src_dir + "/encode/encode_double.c",
+    erl_src_dir + "/encode/encode_fun.c",
+    erl_src_dir + "/encode/encode_list_header.c",
+    erl_src_dir + "/encode/encode_long.c",
+    erl_src_dir + "/encode/encode_longlong.c",
+    erl_src_dir + "/encode/encode_pid.c",
+    erl_src_dir + "/encode/encode_port.c",
+    erl_src_dir + "/encode/encode_ref.c",
+    erl_src_dir + "/encode/encode_string.c",
+    erl_src_dir + "/encode/encode_trace.c",
+    erl_src_dir + "/encode/encode_tuple_header.c",
+    erl_src_dir + "/encode/encode_ulong.c",
+    erl_src_dir + "/encode/encode_ulonglong.c",
+    erl_src_dir + "/encode/encode_version.c",
+    # EPMD
+    erl_src_dir + "/epmd/epmd_port.c",
+    erl_src_dir + "/epmd/epmd_publish.c",
+    erl_src_dir + "/epmd/epmd_unpublish.c",
+    # Global
+    erl_src_dir + "/global/global_names.c",
+    erl_src_dir + "/global/global_register.c",
+    erl_src_dir + "/global/global_unregister.c",
+    erl_src_dir + "/global/global_whereis.c",
+    # Misc
+    erl_src_dir + "/misc/ei_cmp_nc.c",
+    erl_src_dir + "/misc/ei_compat.c",
+    erl_src_dir + "/misc/ei_decode_term.c",
+    erl_src_dir + "/misc/ei_format.c",
+    erl_src_dir + "/misc/ei_init.c",
+    erl_src_dir + "/misc/ei_locking.c",
+    erl_src_dir + "/misc/ei_malloc.c",
+    erl_src_dir + "/misc/ei_portio.c",
+    erl_src_dir + "/misc/ei_printterm.c",
+    erl_src_dir + "/misc/ei_pthreads.c",
+    erl_src_dir + "/misc/ei_trace.c",
+    erl_src_dir + "/misc/ei_x_encode.c",
+    erl_src_dir + "/misc/get_type.c",
+    erl_src_dir + "/misc/show_msg.c",
+]
 
-    opencl_include_dir = os.environ.get('OpenCL_INCLUDE_DIR')
-    if opencl_include_dir:
-        env.Append(CPPDEFINES=[opencl_include_dir])
+erl_interface_obj = []
+for src in erl_interface_sources:
+    if os.path.exists(src):
+        erl_interface_obj.append(env_erl_interface.Object(src))
 
-    opencl_library = os.environ.get('OpenCL_LIBRARY')
-    if opencl_library:
-        env.Append(LIBS=[opencl_library])
-    elif env["platform"] == "windows":
-        env.Append(LIBS=[":OpenCL.dll"])
-    elif env["platform"] == "linux":
-        env.Append(LIBS=[":libOpenCL.so.1"])
+erl_interface_lib = env_erl_interface.StaticLibrary("libei", erl_interface_obj)
 
-    clblast_sources = [
-        "thirdparty/clblast/src/database/database.cpp",
-        "thirdparty/clblast/src/routines/common.cpp",
-        "thirdparty/clblast/src/utilities/compile.cpp",
-        "thirdparty/clblast/src/utilities/clblast_exceptions.cpp",
-        "thirdparty/clblast/src/utilities/timing.cpp",
-        "thirdparty/clblast/src/utilities/utilities.cpp",
-        "thirdparty/clblast/src/api_common.cpp",
-        "thirdparty/clblast/src/cache.cpp",
-        "thirdparty/clblast/src/kernel_preprocessor.cpp",
-        "thirdparty/clblast/src/routine.cpp",
-        "thirdparty/clblast/src/tuning/configurations.cpp",
-        # OpenCL specific sources
-        "thirdparty/clblast/src/clblast.cpp",
-        "thirdparty/clblast/src/clblast_c.cpp",
-        "thirdparty/clblast/src/tuning/tuning_api.cpp"
-    ]
+# CNode source files
+cnode_sources = Glob("src/*.cpp")
 
-    databases = ['copy', 'pad', 'padtranspose', 'transpose', 'xaxpy', 'xdot', 
-                'xgemm', 'xgemm_direct', 'xgemv', 'xgemv_fast', 'xgemv_fast_rot', 
-                'xger', 'invert', 'gemm_routine', 'trsv_routine', 'xconvgemm']
+# Combine all sources
+sources = list(cnode_sources)
 
-    for database in databases:
-        clblast_sources.append('thirdparty/clblast/src/database/kernels/' + database + '/' + database + '.cpp')
+# Link against erl_interface
+env.Prepend(LIBS=[erl_interface_lib])
+env.Prepend(LIBPATH=["."])
 
-    sources.extend(clblast_sources)
-
-    routines = {
-        'level1': Glob("thirdparty/clblast/src/routines/level1/*.cpp"),
-        'level2': Glob("thirdparty/clblast/src/routines/level2/*.cpp"),
-        'level3': Glob("thirdparty/clblast/src/routines/level3/*.cpp"),
-        'levelx': Glob("thirdparty/clblast/src/routines/levelx/*.cpp"),
-    }
-
-    for level, files in routines.items():
-        sources.extend(files)
-
-    sources.extend(Glob("thirdparty/clblast/src/tuners/*.cpp"))
-
+# Build as shared library (GDExtension)
 if env["platform"] == "macos":
-	library = env.SharedLibrary(
-		"bin/addons/godot_whisper/bin/libgodot_whisper{}.framework/libgodot_whisper{}".format(
-			env["suffix"], env["suffix"]
-		),
-		source=sources,
-	)
+    library = env.SharedLibrary(
+        "bin/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
+            env["suffix"], env["suffix"]
+        ),
+        source=sources,
+    )
 elif env["platform"] == "ios":
-	library = env.SharedLibrary(
-		"bin/addons/godot_whisper/bin/libgodot_whisper{}.framework/libgodot_whisper{}".format(
-			env["suffix"], env["suffix"]
-		),
-		source=sources,
-	)
+    library = env.SharedLibrary(
+        "bin/addons/godot_cnode/bin/libgodot_cnode{}.framework/libgodot_cnode{}".format(
+            env["suffix"], env["suffix"]
+        ),
+        source=sources,
+    )
 else:
-	library = env.SharedLibrary(
-		"bin/addons/godot_whisper/bin/libgodot_whisper{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
-		source=sources,
-	)
+    library = env.SharedLibrary(
+        "bin/addons/godot_cnode/bin/libgodot_cnode{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+        source=sources,
+    )
+
 Default(library)
