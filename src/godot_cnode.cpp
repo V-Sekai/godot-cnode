@@ -34,6 +34,7 @@ extern "C" {
 #include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
+#include <godot_cpp/godot.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/node_path.hpp>
@@ -489,18 +490,18 @@ static void encode_method_info(const Dictionary &method, ei_x_buff *x) {
 		Dictionary arg = args[i];
 		ei_x_encode_tuple_header(x, 2);
 		ei_x_encode_string(x, arg["name"].operator String().utf8().get_data());
-		ei_x_encode_long(x, arg["type"]);
+		ei_x_encode_long(x, (long)(int64_t)arg["type"]);
 	}
 	ei_x_encode_empty_list(x);
 
-	ei_x_encode_long(x, method["flags"]);
+	ei_x_encode_long(x, (long)(int64_t)method["flags"]);
 }
 
 /* Helper: Encode property info to BERT */
 static void encode_property_info(const Dictionary &property, ei_x_buff *x) {
 	ei_x_encode_tuple_header(x, 3);
 	ei_x_encode_string(x, property["name"].operator String().utf8().get_data());
-	ei_x_encode_long(x, property["type"]);
+	ei_x_encode_long(x, (long)(int64_t)property["type"]);
 	ei_x_encode_string(x, property.get("class_name", "").operator String().utf8().get_data());
 }
 
@@ -521,6 +522,7 @@ static int handle_call(char *buf, int *index, int fd) {
 	}
 
 	ei_x_buff reply;
+	godot_instance_t *inst;
 
 	/* Initialize reply buffer */
 	ei_x_new(&reply);
@@ -686,24 +688,26 @@ static int handle_call(char *buf, int *index, int fd) {
 				ei_x_encode_string(&reply, "insufficient_args");
 			} else {
 				String singleton_name = args[0].operator String();
-				Engine *engine = Engine::get_singleton();
-				if (engine == nullptr) {
+				StringName name(singleton_name);
+				GDExtensionObjectPtr singleton_obj = internal::gdextension_interface_global_get_singleton(name._native_ptr());
+				if (singleton_obj == nullptr) {
 					ei_x_encode_tuple_header(&reply, 2);
 					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "engine_unavailable");
+					ei_x_encode_string(&reply, "singleton_not_found");
 				} else {
-					Object *singleton = engine->get_singleton_object(StringName(singleton_name));
+					void *binding = internal::gdextension_interface_object_get_instance_binding(singleton_obj, internal::token, &Object::_gde_binding_callbacks);
+					Object *singleton = reinterpret_cast<Object *>(binding);
 					if (singleton == nullptr) {
 						ei_x_encode_tuple_header(&reply, 2);
 						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "singleton_not_found");
+						ei_x_encode_string(&reply, "singleton_binding_failed");
 					} else {
 						ei_x_encode_tuple_header(&reply, 2);
 						ei_x_encode_atom(&reply, "reply");
 						ei_x_encode_tuple_header(&reply, 3);
 						ei_x_encode_atom(&reply, "object");
 						ei_x_encode_string(&reply, singleton->get_class().utf8().get_data());
-						ei_x_encode_long(&reply, (int64_t)singleton->get_instance_id());
+						ei_x_encode_long(&reply, (long)(int64_t)singleton->get_instance_id());
 					}
 				}
 			}
@@ -889,19 +893,12 @@ static int handle_call(char *buf, int *index, int fd) {
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "unknown_module");
 	}
-}
-else {
-	/* Unknown module */
-	ei_x_encode_tuple_header(&reply, 2);
-	ei_x_encode_atom(&reply, "error");
-	ei_x_encode_string(&reply, "unknown_module");
-}
 
-/* Send GenServer-style reply */
-send_reply(&reply, fd);
-ei_x_free(&reply);
+	/* Send GenServer-style reply */
+	send_reply(&reply, fd);
+	ei_x_free(&reply);
 
-return 0;
+	return 0;
 }
 
 /*
