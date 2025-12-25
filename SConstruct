@@ -140,31 +140,31 @@ def find_erl_interface():
 # Get erl_interface paths
 erl_include_paths, erl_lib_paths, erl_libs = find_erl_interface()
 
-    if not erl_include_paths:
-        print("Warning: Could not find erl_interface headers. Trying default paths...")
-        # Fallback: try to use erlang-config or erl (Unix only)
-        if sys.platform != 'win32':
-            try:
-                result = subprocess.run(['erl', '-noshell', '-eval', 
-                                       'io:format("~s~n", [code:lib_dir(erl_interface)]), halt().'],
-                                      capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    erl_interface_dir = result.stdout.strip()
-                    include_dir = os.path.join(erl_interface_dir, 'include')
-                    lib_dir = os.path.join(erl_interface_dir, 'lib')
-                    if os.path.exists(include_dir):
-                        erl_include_paths.append(include_dir)
-                    if os.path.exists(lib_dir):
-                        erl_lib_paths.append(lib_dir)
-            except:
-                pass
+if not erl_include_paths:
+    print("Warning: Could not find erl_interface headers. Trying default paths...")
+    # Fallback: try to use erlang-config or erl (Unix only)
+    if sys.platform != 'win32':
+        try:
+            result = subprocess.run(['erl', '-noshell', '-eval', 
+                                   'io:format("~s~n", [code:lib_dir(erl_interface)]), halt().'],
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                erl_interface_dir = result.stdout.strip()
+                include_dir = os.path.join(erl_interface_dir, 'include')
+                lib_dir = os.path.join(erl_interface_dir, 'lib')
+                if os.path.exists(include_dir):
+                    erl_include_paths.append(include_dir)
+                if os.path.exists(lib_dir):
+                    erl_lib_paths.append(lib_dir)
+        except:
+            pass
 
-    if erl_include_paths:
-        print("Found erl_interface includes:", erl_include_paths)
-        env.Prepend(CPPPATH=erl_include_paths)
-    else:
-        print("Error: Could not find erl_interface headers. Please install erlang-dev (Linux) or erlang (macOS/Windows)")
-        sys.exit(1)
+if erl_include_paths:
+    print("Found erl_interface includes:", erl_include_paths)
+    env.Prepend(CPPPATH=erl_include_paths)
+else:
+    print("Error: Could not find erl_interface headers. Please install erlang-dev (Linux) or erlang (macOS/Windows)")
+    sys.exit(1)
 
 # CNode source files
 cnode_sources = Glob("src/*.cpp")
