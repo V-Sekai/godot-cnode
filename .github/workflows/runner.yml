@@ -35,15 +35,6 @@ jobs:
           - target: { platform: linux, arch: x86_64, os: ubuntu-latest }
             target-type: template_release
             float-precision: double
-          - target: { platform: windows, arch: x86_64, os: windows-latest }
-            target-type: template_release
-            float-precision: single
-          - target: { platform: macos, arch: universal, os: macos-latest }
-            target-type: template_release
-            float-precision: single
-          - target: { platform: android, arch: arm64, os: ubuntu-latest }
-            target-type: template_release
-            float-precision: single
     runs-on: ${{ matrix.target.os }}
     steps:
       # Clone this repository
@@ -54,29 +45,10 @@ jobs:
           fetch-depth: 0
 
       # Setup Erlang/OTP for erl_interface (needed for godot-cnode)
-      # Note: erl_interface is built from source, but we install Erlang for system libraries
-      - name: Setup Erlang/OTP (Linux/Android)
-        if: ${{ matrix.target.platform == 'linux' || matrix.target.platform == 'android' }}
+      - name: Setup Erlang/OTP
         run: |
           sudo apt-get update
           sudo apt-get install -y erlang-dev erlang-base
-
-      - name: Setup Erlang/OTP (macOS)
-        if: ${{ matrix.target.platform == 'macos' }}
-        run: |
-          brew install erlang
-
-      - name: Setup Erlang/OTP (Windows)
-        if: ${{ matrix.target.platform == 'windows' }}
-        shell: pwsh
-        run: |
-          choco install erlang -y
-
-      - name: Setup MinGW for Windows
-        if: ${{ matrix.target.platform == 'windows' }}
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          version: 12.2.0
 
       # Build GDExtension
       - name: 🔗 GDExtension Build
@@ -87,31 +59,6 @@ jobs:
           gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
-          windows-compiler: ${{ matrix.target.platform == 'windows' && 'mingw' || 'msvc' }}
-
-      # Mac Sign (only for macOS on main branch)
-      - name: Set macOS precision extension
-        if: ${{ matrix.target.platform == 'macos' && github.ref == 'refs/heads/main' }}
-        id: macos_ext
-        run: |
-          if [ "${{ matrix.float-precision }}" = "double" ]; then
-            echo "extension=.double" >> $GITHUB_OUTPUT
-          else
-            echo "extension=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Mac Sign
-        if: ${{ matrix.target.platform == 'macos' && github.ref == 'refs/heads/main' }}
-        uses: godotengine/godot-cpp-template/.github/actions/sign@f9564a9c8115139b9624692d39e358291f6d76ce
-        with:
-          FRAMEWORK_PATH: bin/addons/godot_cnode/bin/libgodot_cnode.macos.${{ matrix.target-type }}${{ steps.macos_ext.outputs.extension }}.universal.framework
-          SIGN_FLAGS: "--deep"
-          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-          APPLE_DEV_PASSWORD: ${{ secrets.APPLE_DEV_PASSWORD }}
-          APPLE_DEV_ID: ${{ secrets.APPLE_DEV_ID }}
-          APPLE_DEV_TEAM_ID: ${{ secrets.APPLE_DEV_TEAM_ID }}
-          APPLE_DEV_APP_ID: ${{ secrets.APPLE_DEV_APP_ID }}
 
       # Upload Artifact
       - name: Upload Artifact
@@ -120,8 +67,6 @@ jobs:
           name: Godot_CNode-${{ matrix.target.platform }}-${{ matrix.target.arch }}-${{ matrix.float-precision }}-${{ matrix.target-type }}
           path: |
             ${{ github.workspace }}/bin/**/*.so
-            ${{ github.workspace }}/bin/**/*.dll
-            ${{ github.workspace }}/bin/**/*.framework/**
             ${{ github.workspace }}/bin/addons/godot_cnode/**
           if-no-files-found: error
 
@@ -134,14 +79,6 @@ jobs:
         target:
           [
             { platform: linux, arch: x86_64, os: ubuntu-latest },
-            { platform: windows, arch: x86_64, os: windows-latest },
-            { platform: windows, arch: x86_32, os: windows-latest },
-            { platform: macos, arch: universal, os: macos-latest },
-            { platform: android, arch: arm64, os: ubuntu-latest },
-            { platform: android, arch: arm32, os: ubuntu-latest },
-            { platform: android, arch: x86_64, os: ubuntu-latest },
-            { platform: android, arch: x86_32, os: ubuntu-latest },
-            { platform: ios, arch: arm64, os: macos-latest },
           ]
         target-type: [template_release]
         float-precision: [single, double]
@@ -155,29 +92,10 @@ jobs:
           fetch-depth: 0
 
       # Setup Erlang/OTP for erl_interface (needed for godot-cnode)
-      # Note: erl_interface is built from source, but we install Erlang for system libraries
-      - name: Setup Erlang/OTP (Linux/Android)
-        if: ${{ matrix.target.platform == 'linux' || matrix.target.platform == 'android' }}
+      - name: Setup Erlang/OTP
         run: |
           sudo apt-get update
           sudo apt-get install -y erlang-dev erlang-base
-
-      - name: Setup Erlang/OTP (macOS/iOS)
-        if: ${{ matrix.target.platform == 'macos' || matrix.target.platform == 'ios' }}
-        run: |
-          brew install erlang
-
-      - name: Setup Erlang/OTP (Windows)
-        if: ${{ matrix.target.platform == 'windows' }}
-        shell: pwsh
-        run: |
-          choco install erlang -y
-
-      - name: Setup MinGW for Windows
-        if: ${{ matrix.target.platform == 'windows' }}
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          version: 12.2.0
 
       # Build GDExtension
       - name: 🔗 GDExtension Build
@@ -188,31 +106,6 @@ jobs:
           gdextension-directory: .
           float-precision: ${{ matrix.float-precision }}
           build-target-type: ${{ matrix.target-type }}
-          windows-compiler: ${{ matrix.target.platform == 'windows' && 'mingw' || 'msvc' }}
-
-      # Mac Sign (only for macOS on main branch)
-      - name: Set macOS precision extension
-        if: ${{ matrix.target.platform == 'macos' && github.ref == 'refs/heads/main' }}
-        id: macos_ext
-        run: |
-          if [ "${{ matrix.float-precision }}" = "double" ]; then
-            echo "extension=.double" >> $GITHUB_OUTPUT
-          else
-            echo "extension=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Mac Sign
-        if: ${{ matrix.target.platform == 'macos' && github.ref == 'refs/heads/main' }}
-        uses: godotengine/godot-cpp-template/.github/actions/sign@f9564a9c8115139b9624692d39e358291f6d76ce
-        with:
-          FRAMEWORK_PATH: bin/addons/godot_cnode/bin/libgodot_cnode.macos.${{ matrix.target-type }}${{ steps.macos_ext.outputs.extension }}.universal.framework
-          SIGN_FLAGS: "--deep"
-          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-          APPLE_DEV_PASSWORD: ${{ secrets.APPLE_DEV_PASSWORD }}
-          APPLE_DEV_ID: ${{ secrets.APPLE_DEV_ID }}
-          APPLE_DEV_TEAM_ID: ${{ secrets.APPLE_DEV_TEAM_ID }}
-          APPLE_DEV_APP_ID: ${{ secrets.APPLE_DEV_APP_ID }}
 
       # Upload Artifact
       - name: Upload Artifact
@@ -221,8 +114,6 @@ jobs:
           name: Godot_CNode-${{ matrix.target.platform }}-${{ matrix.target.arch }}-${{ matrix.float-precision }}-${{ matrix.target-type }}
           path: |
             ${{ github.workspace }}/bin/**/*.so
-            ${{ github.workspace }}/bin/**/*.dll
-            ${{ github.workspace }}/bin/**/*.framework/**
             ${{ github.workspace }}/bin/addons/godot_cnode/**
           if-no-files-found: error
 
