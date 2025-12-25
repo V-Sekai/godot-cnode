@@ -4,6 +4,16 @@ Erlang/Elixir CNode interface for Godot Engine as a GDExtension.
 
 This GDExtension allows Erlang/Elixir nodes to communicate with Godot using the Erlang distribution protocol. The CNode server automatically starts when the GDExtension is loaded.
 
+## Supported Platforms
+
+- **Linux** (x86_64)
+- **macOS** (universal)
+- **Windows** (x86_32, x86_64)
+- **iOS** (arm64)
+- **Android** (x86_32, x86_64, arm32, arm64)
+
+Note: Web platform is not supported. This extension requires Erlang's native distribution protocol via `erl_interface`.
+
 ## Building
 
 ### Prerequisites
@@ -24,10 +34,19 @@ This GDExtension allows Erlang/Elixir nodes to communicate with Godot using the 
 
 2. Build the GDExtension:
    ```bash
-   scons target=template_release
+   scons target=template_release platform=<platform>
+   ```
+   
+   Where `<platform>` is one of: `linux`, `macos`, `windows`, `ios`, or `android`.
+   
+   Example:
+   ```bash
+   scons target=template_release platform=linux
+   scons target=template_release platform=macos
+   scons target=template_release platform=windows
    ```
 
-The build system will automatically detect and use the system-installed erl_interface libraries.
+The build system will automatically detect and use the system-installed erl_interface libraries. The GDExtension will be built in `bin/addons/godot_cnode/bin/`.
 
 ## Usage
 
@@ -41,7 +60,7 @@ The build system will automatically detect and use the system-installed erl_inte
 
 ## Architecture
 
-The CNode runs in a background thread and communicates with the current Godot instance. It provides a GenServer-like API (implemented in pure C/C++) that exposes the entire Godot API dynamically. The implementation:
+The CNode runs in a background thread and communicates with the current Godot instance using Erlang's native distribution protocol via `erl_interface`. It provides a GenServer-like API (implemented in pure C/C++) that exposes the entire Godot API dynamically. The implementation:
 
 - **GenServer-style calls**: Synchronous operations via `{call, Module, Function, Args}`
 - **GenServer-style casts**: Asynchronous operations via `{cast, Module, Function, Args}`
