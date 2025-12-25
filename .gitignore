@@ -39,12 +39,5 @@ erl_crash.dump
 *.beam
 *.dump
 
-# Test output files
-scenetree_properties_*.txt
-scenetree_properties.txt
-scenetree_properties_reference.txt
-*.txt
-
 # Pre-commit
 .pre-commit-cache/
-bin/test_cnode_unit
