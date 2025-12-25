@@ -397,33 +397,33 @@ int init_cnode(char *nodename, char *cookie) {
 		return -1;
 	}
 
-	/* Publish the node and get listen file descriptor */
-	/* ei_publish registers with epmd AND creates a listening socket */
-	/* The returned file descriptor IS the listening socket - use it directly */
-	fd = ei_publish(&ec, 0);
+	/* Create listening socket first with ei_listen */
+	int port = 0;  // Let system choose port
+	fd = ei_listen(&ec, &port, 5);  // backlog of 5
 	if (fd < 0) {
-		/* If epmd is not running, try ei_listen as fallback */
-		/* ei_listen creates a listening socket without epmd registration */
-		if (errno == ECONNREFUSED || errno == 61) {
-			fprintf(stderr, "ei_publish failed: epmd (Erlang Port Mapper Daemon) is not running\n");
-			fprintf(stderr, "  Attempting fallback with ei_listen (node may not be discoverable)...\n");
-			
-			int port = 0;  // Let system choose port
-			fd = ei_listen(&ec, &port, 5);  // backlog of 5
-			if (fd < 0) {
-				fprintf(stderr, "ei_listen also failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
-				fprintf(stderr, "  To fix: Start epmd with 'epmd -daemon' or ensure Erlang is installed\n");
-				return -1;
-			}
-			fprintf(stderr, "  Successfully created listening socket on port %d (not registered with epmd)\n", port);
-		} else {
-			fprintf(stderr, "ei_publish failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
-			return -1;
-		}
-	} else {
-		printf("Godot CNode: Successfully published node with epmd\n");
-		printf("Godot CNode: Using listening socket from ei_publish (fd: %d)\n", fd);
+		fprintf(stderr, "ei_listen failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+		return -1;
 	}
+	printf("Godot CNode: Created listening socket on port %d\n", port);
+	
+	/* Now register with epmd using the port from ei_listen */
+	/* We pass the port so epmd knows which port to advertise */
+	int publish_fd = ei_publish(&ec, port);
+	if (publish_fd < 0) {
+		fprintf(stderr, "ei_publish failed: %d (errno: %d, %s)\n", publish_fd, errno, strerror(errno));
+		if (errno == ECONNREFUSED || errno == 61) {
+			fprintf(stderr, "  epmd (Erlang Port Mapper Daemon) is not running\n");
+			fprintf(stderr, "  To fix: Start epmd with 'epmd -daemon'\n");
+		}
+		close(fd);  // Clean up the listening socket
+		return -1;
+	}
+	
+	printf("Godot CNode: Successfully published node with epmd on port %d\n", port);
+	/* Keep publish_fd open to maintain epmd registration */
+	/* We use the ei_listen socket (fd) for accepting connections */
+	/* The publish_fd is just for epmd communication - we don't need to use it */
+	/* Note: We don't close publish_fd - it keeps the node registered with epmd */
 
 	listen_fd = fd;
 	return 0;
@@ -1105,19 +1105,50 @@ void main_loop() {
 		/* Accept connection from Erlang/Elixir node */
 		/* Use ei_accept_tmo with a timeout (5 seconds) to avoid blocking indefinitely */
 		/* ei_accept_tmo returns immediately if no connection, ei_accept blocks forever */
-		fd = ei_accept_tmo(&ec, listen_fd, NULL, 5000);  // 5 second timeout
+		/* Pass a valid ErlConnect structure (can be NULL, but some implementations prefer it) */
+		ErlConnect con;
+		memset(&con, 0, sizeof(ErlConnect));
+		fd = ei_accept_tmo(&ec, listen_fd, &con, 5000);  // 5 second timeout
 		if (fd < 0) {
 			/* Check if it's a timeout (expected when no connections) */
 			if (errno == ETIMEDOUT || errno == 60) {
 				/* Timeout is normal - just means no connection yet, continue waiting */
 				continue;
+			} else if (errno == 0) {
+				/* errno 0 might indicate a timeout that wasn't properly set, or internal error */
+				/* Treat as timeout and continue - this happens when no connection is available */
+				continue;
+			} else if (errno == EINVAL || errno == 22) {
+				/* Invalid argument - the socket from ei_publish might not be suitable for ei_accept */
+				/* This is a known issue - suppress spam, log once, then use blocking ei_accept */
+				static int einval_logged = 0;
+				if (!einval_logged) {
+					fprintf(stderr, "Godot CNode: ei_accept_tmo returned EINVAL, switching to blocking ei_accept\n");
+					einval_logged = 1;
+				}
+				/* Try blocking ei_accept instead */
+				fd = ei_accept(&ec, listen_fd, &con);
+				if (fd < 0) {
+					if (errno == EBADF || errno == 9) {
+						fprintf(stderr, "Godot CNode: listen_fd closed (errno: %d, %s)\n", errno, strerror(errno));
+						break;
+					}
+					/* Other error - wait a bit before retry */
+					usleep(100000);  // 100ms before retry
+					continue;
+				}
 			} else if (errno == EBADF || errno == 9) {
 				/* Bad file descriptor - socket was closed */
 				fprintf(stderr, "Godot CNode: listen_fd closed (errno: %d, %s)\n", errno, strerror(errno));
 				break;
 			} else {
-				/* Other error - log but continue */
-				fprintf(stderr, "ei_accept_tmo failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+				/* Other error - log once per minute to reduce spam */
+				static time_t last_error_log = 0;
+				time_t now = time(NULL);
+				if (now - last_error_log >= 60) {
+					fprintf(stderr, "ei_accept_tmo failed: %d (errno: %d, %s)\n", fd, errno, strerror(errno));
+					last_error_log = now;
+				}
 				usleep(100000);  // 100ms before retry
 				continue;
 			}
