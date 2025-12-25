@@ -397,12 +397,31 @@ static int process_message(char *buf, int *index, int fd) {
 		return -1;
 	}
 	
-	/* Only handle GenServer-style messages: {call, ...} or {cast, ...} */
-	if (strcmp(atom, "call") == 0) {
-		/* GenServer-style call: {call, Module, Function, Args} */
+	/* Handle GenServer-style messages: {'$gen_call', {From, Tag}, Request} or {'$gen_cast', Request} */
+	if (strcmp(atom, "$gen_call") == 0) {
+		/* GenServer call: {'$gen_call', {From, Tag}, Request} */
+		// Decode the From tuple {From, Tag}
+		int from_arity;
+		if (ei_decode_tuple_header(buf, index, &from_arity) < 0 || from_arity != 2) {
+			UtilityFunctions::printerr("Error decoding From tuple in gen_call");
+			return -1;
+		}
+		// Skip From (PID) and Tag (reference) - we don't need them for CNode
+		erlang_pid from_pid;
+		erlang_ref tag_ref;
+		if (ei_decode_pid(buf, index, &from_pid) < 0) {
+			UtilityFunctions::printerr("Error decoding From PID in gen_call");
+			return -1;
+		}
+		if (ei_decode_ref(buf, index, &tag_ref) < 0) {
+			UtilityFunctions::printerr("Error decoding Tag in gen_call");
+			return -1;
+		}
+		// Now decode the Request
 		return handle_call(buf, index, fd);
-	} else if (strcmp(atom, "cast") == 0) {
-		/* GenServer-style cast: {cast, Module, Function, Args} */
+	} else if (strcmp(atom, "$gen_cast") == 0) {
+		/* GenServer cast: {'$gen_cast', Request} */
+		// Request is directly after the atom
 		return handle_cast(buf, index);
 	} else {
 		/* Only GenServer-style messages are supported */
@@ -500,45 +519,55 @@ static int handle_call(char *buf, int *index, int fd) {
 		return -1;
 	}
 	
-	char atom[MAXATOMLEN];
 	ei_x_buff reply;
-	long instance_id;
-	godot_instance_t *inst;
-
-	/* Get the function name */
-	if (ei_decode_atom(buf, index, atom) < 0) {
-		UtilityFunctions::printerr("Error decoding function atom");
-		return -1;
-	}
 
 	/* Initialize reply buffer */
 	ei_x_new(&reply);
 
-	/* Only handle GenServer-style calls: {call, Module, Function, Args} */
-	if (strcmp(atom, "call") == 0) {
-		/* GenServer-like generic call handler: {call, Module, Function, Args} */
-		/* This allows calling any Godot API dynamically */
-		char module[256];
-		char function[256];
-		
-		if (ei_decode_atom(buf, index, module) < 0) {
-			ei_x_encode_tuple_header(&reply, 2);
-			ei_x_encode_atom(&reply, "error");
-			ei_x_encode_string(&reply, "invalid_module");
-		} else if (ei_decode_atom(buf, index, function) < 0) {
-			ei_x_encode_tuple_header(&reply, 2);
-			ei_x_encode_atom(&reply, "error");
-			ei_x_encode_string(&reply, "invalid_function");
-		} else {
-			// Decode arguments array
-			Variant args_array = bert_to_variant(buf, index);
-			Array args;
-			if (args_array.get_type() == Variant::ARRAY) {
-				args = args_array.operator Array();
-			}
-			
-			// Route based on module
-			if (strcmp(module, "godot") == 0) {
+	/* Decode Request: {Module, Function, Args} */
+	int request_arity;
+	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_request_format");
+		send_reply(&reply, fd);
+		ei_x_free(&reply);
+		return -1;
+	}
+
+	/* Decode Module and Function from Request tuple */
+	char module[256];
+	char function[256];
+	
+	if (ei_decode_atom(buf, index, module) < 0) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_module");
+		send_reply(&reply, fd);
+		ei_x_free(&reply);
+		return -1;
+	}
+	
+	if (ei_decode_atom(buf, index, function) < 0) {
+		ei_x_encode_tuple_header(&reply, 2);
+		ei_x_encode_atom(&reply, "error");
+		ei_x_encode_string(&reply, "invalid_function");
+		send_reply(&reply, fd);
+		ei_x_free(&reply);
+		return -1;
+	}
+	
+	// Decode arguments (remaining elements in Request tuple)
+	Array args;
+	if (request_arity > 2) {
+		Variant args_array = bert_to_variant(buf, index);
+		if (args_array.get_type() == Variant::ARRAY) {
+			args = args_array.operator Array();
+		}
+	}
+	
+	// Route based on module
+	if (strcmp(module, "godot") == 0) {
 				// Generic Godot API calls
 				if (strcmp(function, "call_method") == 0) {
 					// {call, godot, call_method, [ObjectID, MethodName, Args]}
@@ -858,16 +887,15 @@ static int handle_call(char *buf, int *index, int fd) {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "error");
 				ei_x_encode_string(&reply, "unknown_module");
-			}
 		}
 	} else {
-		/* Unknown function */
+		/* Unknown module */
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
-		ei_x_encode_string(&reply, "unknown_function");
+		ei_x_encode_string(&reply, "unknown_module");
 	}
 
-	/* Send reply */
+	/* Send GenServer-style reply */
 	send_reply(&reply, fd);
 	ei_x_free(&reply);
 
@@ -884,46 +912,39 @@ static int handle_cast(char *buf, int *index) {
 		return -1;
 	}
 	
-	char atom[MAXATOMLEN];
-	
-	/* Get the function name */
-	if (ei_decode_atom(buf, index, atom) < 0) {
-		UtilityFunctions::printerr("Error decoding function atom");
+	/* Decode Request: {Module, Function, Args} */
+	int request_arity;
+	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
+		UtilityFunctions::printerr("Error: invalid request format in gen_cast");
 		return -1;
 	}
 	
-	/* Handle different cast functions */
-	if (strcmp(atom, "log") == 0) {
-		char msg[256];
-		if (ei_decode_string(buf, index, msg) == 0) {
-			UtilityFunctions::print(String("[Godot CNode] ") + msg);
-		}
-	} else if (strcmp(atom, "cast") == 0) {
-		/* GenServer-like generic cast handler: {cast, Module, Function, Args} */
-		/* This allows calling any Godot API asynchronously (fire and forget) */
-		char module[256];
-		char function[256];
-		
-		if (ei_decode_atom(buf, index, module) < 0) {
-			UtilityFunctions::printerr("Error decoding module in cast");
-			return -1;
-		}
-		
-		if (ei_decode_atom(buf, index, function) < 0) {
-			UtilityFunctions::printerr("Error decoding function in cast");
-			return -1;
-		}
-		
-		// Decode arguments array
+	/* Decode Module and Function from Request tuple */
+	char module[256];
+	char function[256];
+	
+	if (ei_decode_atom(buf, index, module) < 0) {
+		UtilityFunctions::printerr("Error decoding module in cast");
+		return -1;
+	}
+	
+	if (ei_decode_atom(buf, index, function) < 0) {
+		UtilityFunctions::printerr("Error decoding function in cast");
+		return -1;
+	}
+	
+	// Decode arguments (remaining elements in Request tuple)
+	Array args;
+	if (request_arity > 2) {
 		Variant args_array = bert_to_variant(buf, index);
-		Array args;
 		if (args_array.get_type() == Variant::ARRAY) {
 			args = args_array.operator Array();
 		}
-		
-		// Route based on module (async, no reply)
-		if (strcmp(module, "godot") == 0) {
-			if (strcmp(function, "call_method") == 0) {
+	}
+	
+	// Route based on module (async, no reply)
+	if (strcmp(module, "godot") == 0) {
+		if (strcmp(function, "call_method") == 0) {
 				// {cast, godot, call_method, [ObjectID, MethodName, Args]}
 				if (args.size() >= 2) {
 					int64_t object_id = args[0].operator int64_t();
@@ -942,7 +963,7 @@ static int handle_cast(char *buf, int *index) {
 						}
 					}
 				}
-			} else if (strcmp(function, "set_property") == 0) {
+		} else if (strcmp(function, "set_property") == 0) {
 				// {cast, godot, set_property, [ObjectID, PropertyName, Value]}
 				if (args.size() >= 3) {
 					int64_t object_id = args[0].operator int64_t();
@@ -956,7 +977,6 @@ static int handle_cast(char *buf, int *index) {
 							obj->set(prop_name, value);
 						}
 					}
-				}
 			}
 		}
 	}
