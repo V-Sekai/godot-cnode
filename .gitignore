@@ -3,9 +3,11 @@
 *.o
 *.o.tmp
 *.dblite
+*.a
 
 .DS_Store
 .vscode
 
 bin/.godot
+bin/addons/godot_cnode/bin/
 *.code-workspace
