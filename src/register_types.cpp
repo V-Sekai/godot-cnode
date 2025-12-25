@@ -3,12 +3,12 @@
 
 #include <godot_cpp/classes/crypto.hpp>
 #include <godot_cpp/classes/engine.hpp>
-#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/core/class_db.hpp>
-#include <godot_cpp/variant/utility_functions.hpp>
-#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/core/memory.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -33,11 +33,11 @@ void main_loop(void);
 // Generate a cryptographically secure random string using Godot's Crypto class
 static String generate_cryptorandom_string(int length = 32) {
 	using namespace godot;
-	
+
 	// Erlang cookies typically use ASCII alphanumeric characters
 	const char charset[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 	const int charset_size = sizeof(charset) - 1; // -1 to exclude null terminator
-	
+
 	// Use Godot's Crypto class to generate random bytes
 	// Crypto is RefCounted, so we use ClassDB::instantiate and cast to Ref<Crypto>
 	Object *crypto_obj = ClassDB::instantiate("Crypto");
@@ -45,7 +45,7 @@ static String generate_cryptorandom_string(int length = 32) {
 		UtilityFunctions::printerr("Godot CNode: Failed to create Crypto instance");
 		return "godotcookie"; // Fallback
 	}
-	
+
 	Ref<Crypto> crypto = Object::cast_to<Crypto>(crypto_obj);
 	if (crypto.is_null()) {
 		UtilityFunctions::printerr("Godot CNode: Failed to cast to Crypto");
@@ -54,45 +54,45 @@ static String generate_cryptorandom_string(int length = 32) {
 		return "godotcookie"; // Fallback
 	}
 	// Ref<> now owns the object, no need to delete manually
-	
+
 	// Generate random bytes
 	PackedByteArray random_bytes = crypto->generate_random_bytes(length);
 	if (random_bytes.size() != length) {
 		UtilityFunctions::printerr("Godot CNode: Failed to generate random bytes");
 		return "godotcookie"; // Fallback
 	}
-	
+
 	// Convert random bytes to string using charset
 	String result;
 	for (int i = 0; i < length; i++) {
 		uint8_t byte = random_bytes[i];
 		result += charset[byte % charset_size];
 	}
-	
+
 	return result;
 }
 
 // Helper function to read or generate cookie from Godot user data directory
 static String read_or_generate_godot_cnode_cookie() {
 	using namespace godot;
-	
+
 	OS *os = OS::get_singleton();
 	if (!os) {
 		UtilityFunctions::printerr("Godot CNode: OS singleton not available");
 		return "godotcookie"; // Fallback
 	}
-	
+
 	// Priority 1: Environment variable override
 	String env_cookie = os->get_environment("GODOT_CNODE_COOKIE");
 	if (!env_cookie.is_empty()) {
 		UtilityFunctions::print("Godot CNode: Using cookie from GODOT_CNODE_COOKIE environment variable");
 		return env_cookie.strip_edges();
 	}
-	
+
 	// Priority 2: User data directory (project-specific)
 	String user_data_dir = os->get_user_data_dir();
 	String cookie_path = user_data_dir.path_join("cnode_cookie");
-	
+
 	Ref<FileAccess> file = FileAccess::open(cookie_path, FileAccess::READ);
 	if (file.is_valid()) {
 		String cookie = file->get_as_text().strip_edges();
@@ -102,38 +102,38 @@ static String read_or_generate_godot_cnode_cookie() {
 			return cookie;
 		}
 	}
-	
+
 	// Priority 3: Generate a new cryptographically random cookie using Godot's Crypto
 	UtilityFunctions::print("Godot CNode: No cookie file found, generating new cryptographically random cookie...");
 	String new_cookie = generate_cryptorandom_string(32);
-	
+
 	// Save the generated cookie to the user data directory
 	file = FileAccess::open(cookie_path, FileAccess::WRITE);
 	if (file.is_valid()) {
 		file->store_string(new_cookie);
 		file->close();
-		
+
 		UtilityFunctions::print(String("Godot CNode: Generated and saved new cookie to: ") + cookie_path);
 		UtilityFunctions::print(String("  Cookie: ") + new_cookie);
 	} else {
 		UtilityFunctions::printerr(String("Godot CNode: Failed to save cookie to: ") + cookie_path);
 		UtilityFunctions::printerr("  Using generated cookie for this session only");
 	}
-	
+
 	return new_cookie;
 }
 
 // CNode server thread function
 static void cnode_server_thread() {
 	using namespace godot;
-	
+
 	// Read or generate cookie from Godot user data directory
 	String cookie_str = read_or_generate_godot_cnode_cookie();
-	
+
 	// Convert to C string (CharString manages the memory)
 	CharString cookie_cstr = cookie_str.utf8();
 	const char *cookie = cookie_cstr.get_data();
-	
+
 	// Node name (could also be made configurable)
 	char *nodename = const_cast<char *>("godot@127.0.0.1");
 
@@ -219,4 +219,3 @@ GDExtensionBool GDE_EXPORT godot_cnode_library_init(
 	return init_obj.init();
 }
 }
-
