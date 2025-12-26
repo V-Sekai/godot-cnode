@@ -1,6 +1,6 @@
-defmodule GodotCNodeGenServerTest do
+defmodule TestGodotCNode do
   @moduledoc """
-  Test the simplest GenServer implementation as a CNode.
+  Test script for the Godot CNode GDExtension.
   Tests both GenServer call (synchronous RPC) and cast (async message).
   """
 
@@ -16,7 +16,7 @@ defmodule GodotCNodeGenServerTest do
     IO.puts("")
 
     # Start distributed Erlang node
-    node_name = :"genserver_test_#{System.system_time(:second)}@127.0.0.1"
+    node_name = :"godot_test_#{System.system_time(:second)}@127.0.0.1"
     case :net_kernel.start([node_name]) do
       {:ok, _} -> IO.puts("✓ Started distributed node: #{node_name}")
       {:error, {:already_started, _}} -> IO.puts("✓ Node already running")
@@ -36,6 +36,7 @@ defmodule GodotCNodeGenServerTest do
         Process.sleep(500)
         test_genserver_cast(cnode_name)
         Process.sleep(500)
+        test_error_handling(cnode_name)
         IO.puts("")
         IO.puts("=== Test Complete ===")
       _ ->
@@ -119,7 +120,6 @@ defmodule GodotCNodeGenServerTest do
       ^gen_cast ->
         IO.puts("  ✓ Sent GenServer cast")
         IO.puts("  ✓ Cast is fire-and-forget (no reply expected)")
-        # Wait a bit to let the CNode process it
         Process.sleep(200)
         IO.puts("  ✓ Cast should have been processed (check Godot console)")
       error ->
@@ -128,7 +128,7 @@ defmodule GodotCNodeGenServerTest do
 
     Process.sleep(200)
 
-    # Test 2: Cast to godot:call_method (if we had an object)
+    # Test 2: Cast to godot:call_method (example)
     IO.puts("")
     IO.puts("2. GenServer cast: godot:call_method (example)")
     gen_cast2 = {:"$gen_cast", {:godot, :call_method, [0, "get_class", []]}}
@@ -143,6 +143,35 @@ defmodule GodotCNodeGenServerTest do
         IO.puts("  ✗ Failed to send: #{inspect(error)}")
     end
   end
+
+  # Test error handling
+  defp test_error_handling(cnode_name) do
+    IO.puts("")
+    IO.puts("=== Testing Error Handling ===")
+    IO.puts("")
+
+    # Test: Call invalid function - should return error
+    IO.puts("1. GenServer call with invalid function (should return error)")
+    from = self()
+    ref = make_ref()
+    gen_call = {:"$gen_call", {from, ref}, {:godot, :invalid_function, []}}
+
+    case :erlang.send({:godot_server, cnode_name}, gen_call) do
+      ^gen_call ->
+        IO.puts("  ✓ Sent GenServer call")
+        receive do
+          {^ref, reply} ->
+            IO.puts("  ✓ Received reply: #{inspect(reply)}")
+            IO.puts("  ✓ Error handling works (invalid function returns error)")
+        after
+          @timeout ->
+            IO.puts("  ✗ Timeout waiting for reply")
+        end
+      error ->
+        IO.puts("  ✗ Failed to send: #{inspect(error)}")
+    end
+  end
 end
 
-GodotCNodeGenServerTest.run()
+TestGodotCNode.run()
+

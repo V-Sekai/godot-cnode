@@ -1,6 +1,6 @@
-defmodule TestCNodeElixirTest do
+defmodule TestStandaloneCNode do
   @moduledoc """
-  Test script for the standalone C CNode with GenServer features.
+  Test script for the standalone C CNode (test_cnode).
   Tests both GenServer call (synchronous RPC) and cast (async message).
   """
 
@@ -43,7 +43,7 @@ defmodule TestCNodeElixirTest do
       _ ->
         IO.puts("✗ Failed to connect to CNode")
         IO.puts("  Make sure the standalone CNode is running:")
-        IO.puts("    cd test && make && ./test_cnode test_cnode@127.0.0.1 godotcookie")
+        IO.puts("    cd test && ./test_cnode test_cnode@127.0.0.1 godotcookie")
         System.halt(1)
     end
   end
@@ -235,4 +235,5 @@ defmodule TestCNodeElixirTest do
   end
 end
 
-TestCNodeElixirTest.run()
+TestStandaloneCNode.run()
+
