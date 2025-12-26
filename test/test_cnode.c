@@ -10,18 +10,39 @@
  * Used for debugging reply issues by comparing with Godot CNode behavior.
  */
 
+// Define POSIX feature test macros BEFORE any includes
+// Only on Unix systems (not Windows)
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200112L
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
+
+// POSIX-specific headers (not available on Windows)
+#ifndef _WIN32
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <sys/time.h>
-#include <time.h>
 #include <fcntl.h>
+#else
+// Windows equivalents
+#include <io.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <basetsd.h>  // For SSIZE_T
+#define close closesocket
+#define usleep(x) Sleep((x)/1000)
+// Define ssize_t for MSVC (POSIX type not available in MSVC)
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+typedef SSIZE_T ssize_t;
+#endif
+#endif
 
 // erl_interface headers
 #include "ei.h"
@@ -69,10 +90,16 @@ static int macos_tcp_accept(void **ctx, void *addr, int *len, unsigned __attribu
 		return res;
 
 	/* Ensure socket is in blocking mode (not non-blocking) */
+#ifndef _WIN32
 	int flags = fcntl(fd, F_GETFL, 0);
 	if (flags >= 0) {
 		fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 	}
+#else
+	/* On Windows, use ioctlsocket to set blocking mode */
+	unsigned long mode = 0;  // 0 = blocking
+	ioctlsocket(fd, FIONBIO, &mode);
+#endif
 
 	/* Call accept() directly */
 	res = accept(fd, (struct sockaddr *)addr, &addr_len);
@@ -282,25 +309,43 @@ static int process_message(char *buf, int *index, int fd) {
 	char atom[MAXATOMLEN];
 	int saved_index = *index;
 
+	/* Debug output removed - uncomment if needed for debugging */
+	/* printf("Test CNode: process_message - starting at index: %d\n", *index); */
+
 	/* Decode version (optional) */
 	if (ei_decode_version(buf, index, &version) < 0) {
+		printf("Test CNode: No version header, skipping\n");
 		*index = saved_index;
 	} else {
+		/* Version decoded successfully */
 		saved_index = *index;
 	}
 
 	/* Decode tuple header */
 	if (ei_decode_tuple_header(buf, index, &arity) < 0) {
-		fprintf(stderr, "Error decoding tuple header\n");
+		fprintf(stderr, "Error decoding tuple header at index: %d\n", *index);
+		fprintf(stderr, "Buffer bytes at index: ");
+		for (int i = 0; i < 16 && i < 1024; i++) {
+			fprintf(stderr, "%02x ", (unsigned char)buf[*index + i]);
+		}
+		fprintf(stderr, "\n");
+		fflush(stderr);
 		return -1;
 	}
-
 	/* Check if this is a GenServer-style message */
 	int tuple_start_index = *index;
+	
 	if (ei_decode_atom(buf, index, atom) < 0) {
-		fprintf(stderr, "Error decoding atom\n");
+		fprintf(stderr, "Test CNode: Error decoding atom at index: %d\n", *index);
+		fprintf(stderr, "Test CNode: Bytes at error position: ");
+		for (int i = 0; i < 16 && (*index + i) < 1024; i++) {
+			fprintf(stderr, "%02x ", (unsigned char)buf[*index + i]);
+		}
+		fprintf(stderr, "\n");
+		fflush(stderr);
 		return -1;
 	}
+	/* Atom decoded: atom */
 
 	/* Handle GenServer call */
 	if (strcmp(atom, "$gen_call") == 0) {
@@ -323,6 +368,9 @@ static int process_message(char *buf, int *index, int fd) {
 		}
 
 		printf("Test CNode: Received GenServer call (synchronous RPC with reply)\n");
+		printf("Test CNode: From PID: %s, Tag ref: [%d, %d, %d]\n", 
+			from_pid.node, tag_ref.len, tag_ref.n[0], tag_ref.n[1]);
+		fflush(stdout);
 		return handle_call(buf, index, fd, &from_pid, &tag_ref);
 	}
 	/* Handle GenServer cast */
@@ -335,22 +383,43 @@ static int process_message(char *buf, int *index, int fd) {
 	else if (strcmp(atom, "rex") == 0) {
 		/* RPC message format: {rex, From, Request} where Request is {'$gen_call', ...} */
 		printf("Test CNode: Received RPC message (rex format)\n");
+		printf("Test CNode: Current index after 'rex' atom: %d\n", *index);
+		fflush(stdout);
 
+		/* The From field might be a PID or an atom - try PID first */
+		int saved_index = *index;
 		erlang_pid rpc_from_pid;
 		if (ei_decode_pid(buf, index, &rpc_from_pid) < 0) {
-			fprintf(stderr, "Error decoding From PID in rex message\n");
+			/* Not a PID - might be an atom (node name) */
+			*index = saved_index;
+			char from_atom[MAXATOMLEN];
+			if (ei_decode_atom(buf, index, from_atom) < 0) {
+				fprintf(stderr, "Error decoding From field in rex message (tried PID and atom)\n");
+				fflush(stderr);
+				return -1;
+			}
+			/* When From is an atom, the Request encoding may differ - TODO: investigate */
+			/* For now, return error as this format needs further investigation */
+			fprintf(stderr, "Error: rex format with atom From field not fully supported yet\n");
+			fflush(stderr);
 			return -1;
+		} else {
+			/* From is a PID - standard format */
 		}
 
+		/* The Request in rex format is the gen_call tuple directly: {'$gen_call', {From, Tag}, Request} */
 		int request_arity;
 		if (ei_decode_tuple_header(buf, index, &request_arity) < 0) {
 			fprintf(stderr, "Error decoding Request tuple in rex message\n");
+			fflush(stderr);
 			return -1;
 		}
 
+		/* The first element should be '$gen_call' */
 		char gen_call_atom[MAXATOMLEN];
 		if (ei_decode_atom(buf, index, gen_call_atom) < 0 || strcmp(gen_call_atom, "$gen_call") != 0) {
 			fprintf(stderr, "Error: Request in rex message is not a gen_call (got: %s)\n", gen_call_atom);
+			fflush(stderr);
 			return -1;
 		}
 
@@ -372,6 +441,7 @@ static int process_message(char *buf, int *index, int fd) {
 		}
 
 		printf("Test CNode: Processing rex GenServer call\n");
+		fflush(stdout);
 		return handle_call(buf, index, fd, &from_pid, &tag_ref);
 	}
 	/* Handle plain message */
@@ -445,6 +515,8 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	} else if (strcmp(module, "test") == 0) {
 		if (strcmp(function, "ping") == 0) {
 			/* Simple ping/pong */
+			printf("Test CNode: Encoding reply - pong\n");
+			fflush(stdout);
 			ei_x_encode_atom(&reply, "pong");
 		} else if (strcmp(function, "echo") == 0) {
 			/* Echo back arguments */
@@ -476,7 +548,11 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	}
 
 	/* Send reply */
+	printf("Test CNode: About to send reply (reply buffer size: %d bytes)\n", reply.index);
+	fflush(stdout);
 	send_reply(&reply, fd, from_pid, tag_ref);
+	printf("Test CNode: Reply sent, freeing buffer\n");
+	fflush(stdout);
 	ei_x_free(&reply);
 
 	return 0;
@@ -541,20 +617,20 @@ static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag
 	/* Append the reply data */
 	ei_x_append_buf(&gen_reply, x->buff, x->index);
 
-	/* Debug: Print hex dump of reply buffer */
-	printf("Test CNode: Reply buffer (hex, first 64 bytes): ");
-	for (int i = 0; i < gen_reply.index && i < 64; i++) {
-		printf("%02x ", (unsigned char)gen_reply.buff[i]);
-	}
-	printf("\n");
-
 	/* Send the reply */
 	int send_result = ei_send(fd, to_pid, gen_reply.buff, gen_reply.index);
 	if (send_result < 0) {
-		fprintf(stderr, "Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
+		fprintf(stderr, "Test CNode: Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
+#ifdef _WIN32
+		int wsa_err = WSAGetLastError();
+		fprintf(stderr, "Test CNode: WSA error: %d\n", wsa_err);
+#endif
+		fflush(stderr);
 	} else {
 		printf("Test CNode: Reply sent successfully (%d bytes)\n", gen_reply.index);
 		fflush(stdout);
+		/* Give time for reply transmission */
+		usleep(1000000); // 1000ms
 	}
 
 	ei_x_free(&gen_reply);
@@ -614,10 +690,14 @@ static void main_loop(void) {
 			}
 		}
 
-		printf("Test CNode: ✓ Accepted connection on fd: %d\n", fd);
+		/* Track connection with unique ID */
+		static int connection_counter = 0;
+		int conn_id = ++connection_counter;
+		printf("Test CNode: ✓ Accepted connection #%d on fd: %d\n", conn_id, fd);
 		if (con.nodename[0] != '\0') {
-			printf("Test CNode: Connected from node: %s\n", con.nodename);
+			printf("Test CNode: [Conn #%d] Connected from node: %s\n", conn_id, con.nodename);
 		}
+		fflush(stdout);
 
 		/* Register global name "test_server" on first connection */
 		static int name_registered = 0;
@@ -632,6 +712,7 @@ static void main_loop(void) {
 		}
 
 		/* Process messages from this connection */
+		/* Keep connection open to receive multiple messages and send replies */
 		while (1) {
 			/* Wait for data to be available using select() */
 			fd_set recv_fds;
@@ -642,14 +723,19 @@ static void main_loop(void) {
 			recv_timeout.tv_usec = 0;
 			int select_res = select(fd + 1, &recv_fds, NULL, NULL, &recv_timeout);
 
+			/* select() result: select_res */
+
 			if (select_res <= 0 || !FD_ISSET(fd, &recv_fds)) {
 				/* Timeout or error - check if connection is still alive */
 				if (select_res == 0) {
 					/* Timeout - connection might be idle, continue waiting */
+					printf("Test CNode: [Conn #%d] select() timeout, continuing to wait\n", conn_id);
+					fflush(stdout);
 					continue;
 				} else {
 					/* select() error - connection might be closed */
-					printf("Test CNode: select() error, closing connection\n");
+					printf("Test CNode: [Conn #%d] select() error (errno: %d, %s), closing connection\n", conn_id, errno, strerror(errno));
+					fflush(stdout);
 					break;
 				}
 			}
@@ -663,46 +749,246 @@ static void main_loop(void) {
 			} else if (res == ERL_ERROR) {
 				/* Error or connection closed */
 				int saved_errno = errno;
+				/* errno 0 can mean EOF, but also can mean ei_receive_msg couldn't decode the message */
+				/* Try to process message from buffer if it has data (similar to macOS compatibility fix) */
+				if (saved_errno == 0) {
+					
+					/* Check if buffer has any data at all */
+					/* Even if index is 0, the buffer might have been allocated and contain data */
+					/* Try to peek at the buffer to see if there's data */
+					if (x.index > 0 || (x.buff != NULL && x.buffsz > 0)) {
+						/* Check if buffer actually contains BERT data (starts with 0x83) */
+						int has_bert_data = 0;
+						if (x.index > 0 && x.buff[0] == 0x83) {
+							has_bert_data = 1;
+						} else if (x.buffsz > 0 && x.buff[0] == 0x83) {
+							has_bert_data = 1;
+							x.index = x.buffsz; /* Use full buffer size */
+						}
+						
+						if (has_bert_data) {
+							/* Process the message from buffer */
+							x.index = 0;
+							int process_result = process_message(x.buff, &x.index, fd);
+							ei_x_free(&x);
+							ei_x_new(&x);
+							if (process_result < 0) {
+								fprintf(stderr, "Test CNode: [Conn #%d] Error processing message from buffer\n", conn_id);
+								fflush(stderr);
+							} else {
+								if (process_result == 0) {
+									usleep(1000000); // 1000ms - wait for reply transmission
+								}
+							}
+							continue;
+						}
+					}
+					
+					/* Buffer is empty or doesn't contain BERT data - try raw read */
+					{
+						/* Buffer is empty but ei_receive_msg failed - try raw read */
+						/* This can happen when ei_receive_msg can't decode the message format */
+						unsigned char raw_buf[4096];
+						ssize_t bytes_read = recv(fd, raw_buf, sizeof(raw_buf), 0);
+						
+						if (bytes_read > 0) {
+							
+							/* Copy raw data to buffer and try to decode */
+							ei_x_free(&x);
+							ei_x_new(&x);
+							memcpy(x.buff, raw_buf, bytes_read);
+							x.index = bytes_read;
+							
+							/* Try to process the message */
+							/* The distribution protocol format is: [4-byte length] [message data] */
+							/* The message data contains: "To Name" + actual BERT message(s) */
+							/* We need to find the BERT version byte (0x83) in the payload */
+							int decode_index = 0;
+							if (bytes_read >= 4) {
+								/* Check if first 4 bytes are a length header */
+								unsigned long msg_len = (raw_buf[0] << 24) | (raw_buf[1] << 16) | (raw_buf[2] << 8) | raw_buf[3];
+								
+								if (msg_len > 0 && msg_len < 1048576) { /* Reasonable message size (1MB max) */
+									/* Look for ALL BERT version bytes (0x83) in the payload */
+									/* The first one is usually in the "To Name" control message */
+									/* The actual message comes after that */
+									int bert_starts[10]; /* Max 10 potential messages */
+									int bert_count = 0;
+									for (int i = 4; i < bytes_read && bert_count < 10; i++) {
+										if (raw_buf[i] == 0x83) {
+											/* Verify this looks like a valid BERT message start */
+											/* Next byte should be a valid BERT type (tuple, list, etc.) */
+											if (i + 1 < bytes_read) {
+												unsigned char next_byte = raw_buf[i + 1];
+												/* Valid BERT types after version: 68 (small tuple), 6C (large tuple), etc. */
+												if (next_byte == 0x68 || next_byte == 0x6C || next_byte == 0x6A || next_byte == 0x6B) {
+													bert_starts[bert_count++] = i;
+												}
+											}
+										}
+									}
+									
+									if (bert_count > 0) {
+										/* Use the last BERT message found (usually the actual message, after "To Name") */
+										/* Or if only one, use it */
+										int msg_idx = (bert_count > 1) ? bert_count - 1 : 0;
+										decode_index = bert_starts[msg_idx];
+									} else {
+										/* Fallback: try starting at offset 4 */
+										decode_index = 4;
+									}
+								}
+							}
+							
+							x.index = decode_index;
+							int process_result = process_message(x.buff, &x.index, fd);
+							ei_x_free(&x);
+							ei_x_new(&x);
+							if (process_result < 0) {
+								fprintf(stderr, "Test CNode: [Conn #%d] Error processing message from raw read\n", conn_id);
+								fflush(stderr);
+							} else {
+								if (process_result == 0) {
+									/* Message processed successfully - give time for reply to be sent */
+									usleep(1000000); // 1000ms - wait for reply transmission
+								}
+							}
+							/* Continue waiting for more messages on this connection */
+							/* Don't break - keep connection open */
+							/* Reset buffer for next message */
+							ei_x_free(&x);
+							ei_x_new(&x);
+							continue;
+						} else if (bytes_read == 0) {
+							/* EOF - connection closed */
+							break;
+						} else {
+							/* Error on raw read */
+#ifdef _WIN32
+							int wsa_err = WSAGetLastError();
+							if (wsa_err == WSAECONNRESET || wsa_err == WSAENOTCONN) {
+#else
+							if (errno == ECONNRESET || errno == EPIPE) {
+#endif
+								break;
+							}
+							/* Other error, continue to check socket state */
+						}
+					}
+				}
 				if (saved_errno == ECONNRESET || saved_errno == EPIPE || saved_errno == 0) {
 					/* Connection closed or no data (errno 0 can mean EOF) */
 					if (saved_errno == 0) {
 						/* Check if socket is actually closed by trying to read */
+						printf("Test CNode: [Conn #%d] Checking socket state with MSG_PEEK...\n", conn_id);
+						fflush(stdout);
 						char test_buf[1];
+#ifndef _WIN32
 						ssize_t test_read = recv(fd, test_buf, 1, MSG_PEEK | MSG_DONTWAIT);
+#else
+						/* On Windows, use non-blocking recv with timeout */
+						unsigned long mode = 1;  // 1 = non-blocking
+						ioctlsocket(fd, FIONBIO, &mode);
+						ssize_t test_read = recv(fd, test_buf, 1, MSG_PEEK);
+						mode = 0;  // Set back to blocking
+						ioctlsocket(fd, FIONBIO, &mode);
+#endif
+						printf("Test CNode: [Conn #%d] MSG_PEEK returned: %zd", conn_id, test_read);
+						if (test_read < 0) {
+#ifdef _WIN32
+							int wsa_err = WSAGetLastError();
+							printf(" (WSA error: %d)", wsa_err);
+#else
+							printf(" (errno: %d, %s)", errno, strerror(errno));
+#endif
+						}
+						printf("\n");
+						fflush(stdout);
+						
 						if (test_read == 0) {
-							printf("Test CNode: Connection closed by peer (EOF)\n");
+							printf("Test CNode: [Conn #%d] Connection closed by peer (EOF)\n", conn_id);
+							fflush(stdout);
 							break;
-						} else if (test_read < 0 && (errno == ECONNRESET || errno == EPIPE)) {
-							printf("Test CNode: Connection closed by peer\n");
-							break;
+						} else if (test_read < 0) {
+#ifdef _WIN32
+							int wsa_err = WSAGetLastError();
+							if (wsa_err == WSAECONNRESET || wsa_err == WSAENOTCONN) {
+#else
+							if (errno == ECONNRESET || errno == EPIPE) {
+#endif
+								printf("Test CNode: [Conn #%d] Connection closed by peer\n", conn_id);
+								fflush(stdout);
+								break;
+							}
 						}
 						/* errno 0 but socket still open - might be a false positive, continue */
+						printf("Test CNode: [Conn #%d] Socket still open, continuing to wait for data\n", conn_id);
+						fflush(stdout);
 						continue;
 					}
-					printf("Test CNode: Connection closed by peer\n");
+					printf("Test CNode: [Conn #%d] Connection closed by peer (errno: %d)\n", conn_id, saved_errno);
+					fflush(stdout);
 					break;
 				} else {
-					fprintf(stderr, "Test CNode: ei_receive_msg error (errno: %d, %s)\n", saved_errno, strerror(saved_errno));
+					fprintf(stderr, "Test CNode: [Conn #%d] ei_receive_msg error (errno: %d, %s)\n", conn_id, saved_errno, strerror(saved_errno));
+					fflush(stderr);
 					break;
 				}
-			} else if (res == ERL_MSG) {
+				} else if (res == ERL_MSG) {
 				/* Message received */
-				x.index = 0;
-				int process_result = process_message(x.buff, &x.index, fd);
+				/* Save buffer size before resetting index */
+				int saved_buffer_index = x.index;
+				
+				/* Debug: Check buffer state */
+				printf("Test CNode: [Conn #%d] ERL_MSG received: buffer index=%d, buff=%p, first byte=0x%02x\n", 
+					conn_id, saved_buffer_index, (void*)x.buff, 
+					(saved_buffer_index > 0 && x.buff != NULL) ? (unsigned char)x.buff[0] : 0);
+				fflush(stdout);
+				
+				/* Check if this looks like a BERT message (starts with 0x83) */
+				/* IMPORTANT: Check BEFORE resetting index */
+				/* CRITICAL: Cast to unsigned char to avoid sign extension issues */
+				int is_bert = (saved_buffer_index > 0 && x.buff != NULL && (unsigned char)x.buff[0] == 0x83);
+				printf("Test CNode: [Conn #%d] BERT check: saved_index=%d, buff!=NULL=%d, first_byte=0x%02x, is_bert=%d\n",
+					conn_id, saved_buffer_index, (x.buff != NULL ? 1 : 0),
+					(saved_buffer_index > 0 && x.buff != NULL) ? (unsigned char)x.buff[0] : 0, is_bert);
+				fflush(stdout);
+				
+				if (is_bert) {
+					printf("Test CNode: [Conn #%d] Message is BERT format, processing...\n", conn_id);
+					fflush(stdout);
+					x.index = 0;
+					int process_result = process_message(x.buff, &x.index, fd);
 
-				ei_x_free(&x);
-				ei_x_new(&x);
+					ei_x_free(&x);
+					ei_x_new(&x);
 
-				if (process_result < 0) {
-					fprintf(stderr, "Test CNode: Error processing message, closing connection\n");
-					break;
+					if (process_result < 0) {
+						fprintf(stderr, "Test CNode: [Conn #%d] Error processing message, closing connection\n", conn_id);
+						fflush(stderr);
+						break;
+					}
+					
+					/* For GenServer calls, give time for reply to be sent and received */
+					/* Don't close connection immediately - keep it open for potential replies */
+					if (process_result == 0) {
+						/* Message processed successfully - wait a bit for reply transmission */
+						usleep(100000); // 100ms
+					}
+				} else {
+					/* Not a BERT message - might be a system message */
+					/* Free and continue - this might be a system message we don't handle */
+					/* But also check if there's more data available - the actual message might come next */
+					ei_x_free(&x);
+					ei_x_new(&x);
+					/* Continue to wait for the actual BERT message */
+					continue;
 				}
 			}
 		}
 
 		/* Close connection */
 		close(fd);
-		printf("Test CNode: Connection closed\n");
 	}
 
 	ei_x_free(&x);
@@ -712,6 +998,16 @@ static void main_loop(void) {
  * Main entry point
  */
 int main(int argc, char *argv[]) {
+#ifdef _WIN32
+	// Initialize Winsock on Windows
+	WSADATA wsaData;
+	int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (wsaResult != 0) {
+		fprintf(stderr, "WSAStartup failed: %d\n", wsaResult);
+		return 1;
+	}
+#endif
+
 	const char *nodename = "test_cnode@127.0.0.1";
 	const char *cookie = "godotcookie";
 
@@ -749,6 +1045,11 @@ int main(int argc, char *argv[]) {
 	if (publish_fd >= 0) {
 		close(publish_fd);
 	}
+
+#ifdef _WIN32
+	// Cleanup Winsock on Windows
+	WSACleanup();
+#endif
 
 	return 0;
 }
