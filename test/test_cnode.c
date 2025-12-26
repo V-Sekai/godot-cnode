@@ -334,7 +334,7 @@ static int process_message(char *buf, int *index, int fd) {
 	}
 	/* Check if this is a GenServer-style message */
 	int tuple_start_index = *index;
-	
+
 	if (ei_decode_atom(buf, index, atom) < 0) {
 		fprintf(stderr, "Test CNode: Error decoding atom at index: %d\n", *index);
 		fprintf(stderr, "Test CNode: Bytes at error position: ");
@@ -368,10 +368,14 @@ static int process_message(char *buf, int *index, int fd) {
 		}
 
 		printf("Test CNode: Received GenServer call (synchronous RPC with reply)\n");
-		printf("Test CNode: From PID: %s, Tag ref: [%d, %d, %d]\n", 
+		printf("Test CNode: From PID: %s, Tag ref: [%d, %d, %d]\n",
 			from_pid.node, tag_ref.len, tag_ref.n[0], tag_ref.n[1]);
+		printf("Test CNode: Calling handle_call with index: %d\n", *index);
 		fflush(stdout);
-		return handle_call(buf, index, fd, &from_pid, &tag_ref);
+		int result = handle_call(buf, index, fd, &from_pid, &tag_ref);
+		printf("Test CNode: handle_call returned: %d\n", result);
+		fflush(stdout);
+		return result;
 	}
 	/* Handle GenServer cast */
 	else if (strcmp(atom, "$gen_cast") == 0) {
@@ -383,14 +387,14 @@ static int process_message(char *buf, int *index, int fd) {
 	else if (strcmp(atom, "rex") == 0) {
 		/* RPC message format: {rex, From, Request} where Request is {'$gen_call', ...} */
 		printf("Test CNode: Received RPC message (rex format)\n");
-		printf("Test CNode: Current index after 'rex' atom: %d\n", *index);
 		fflush(stdout);
 
-		/* The From field might be a PID or an atom - try PID first */
+		/* The From field can be a PID or an atom (node name) - skip it, we only need the Request */
+		/* Try to decode as PID first, then as atom if that fails */
 		int saved_index = *index;
 		erlang_pid rpc_from_pid;
 		if (ei_decode_pid(buf, index, &rpc_from_pid) < 0) {
-			/* Not a PID - might be an atom (node name) */
+			/* Not a PID - try atom (node name) */
 			*index = saved_index;
 			char from_atom[MAXATOMLEN];
 			if (ei_decode_atom(buf, index, from_atom) < 0) {
@@ -398,13 +402,11 @@ static int process_message(char *buf, int *index, int fd) {
 				fflush(stderr);
 				return -1;
 			}
-			/* When From is an atom, the Request encoding may differ - TODO: investigate */
-			/* For now, return error as this format needs further investigation */
-			fprintf(stderr, "Error: rex format with atom From field not fully supported yet\n");
-			fflush(stderr);
-			return -1;
+			printf("Test CNode: rex From field is atom (node name): %s\n", from_atom);
+			fflush(stdout);
 		} else {
-			/* From is a PID - standard format */
+			printf("Test CNode: rex From field is PID: %s\n", rpc_from_pid.node);
+			fflush(stdout);
 		}
 
 		/* The Request in rex format is the gen_call tuple directly: {'$gen_call', {From, Tag}, Request} */
@@ -423,6 +425,7 @@ static int process_message(char *buf, int *index, int fd) {
 			return -1;
 		}
 
+		/* Decode the {From, Tag} tuple from the gen_call */
 		int from_arity;
 		if (ei_decode_tuple_header(buf, index, &from_arity) < 0 || from_arity != 2) {
 			fprintf(stderr, "Error decoding From tuple in rex gen_call\n");
@@ -440,9 +443,13 @@ static int process_message(char *buf, int *index, int fd) {
 			return -1;
 		}
 
-		printf("Test CNode: Processing rex GenServer call\n");
+		printf("Test CNode: Processing rex GenServer call (From PID: %s)\n", from_pid.node);
+		printf("Test CNode: Calling handle_call with index: %d\n", *index);
 		fflush(stdout);
-		return handle_call(buf, index, fd, &from_pid, &tag_ref);
+		int result = handle_call(buf, index, fd, &from_pid, &tag_ref);
+		printf("Test CNode: handle_call returned: %d\n", result);
+		fflush(stdout);
+		return result;
 	}
 	/* Handle plain message */
 	else {
@@ -749,23 +756,32 @@ static void main_loop(void) {
 			} else if (res == ERL_ERROR) {
 				/* Error or connection closed */
 				int saved_errno = errno;
+
+				/* Handle EAGAIN/EWOULDBLOCK (errno 35 on macOS) - data not ready yet, retry */
+				if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK || saved_errno == 35) {
+					printf("Test CNode: [Conn #%d] ei_receive_msg: data not ready yet (errno: %d), retrying...\n", conn_id, saved_errno);
+					fflush(stdout);
+					usleep(10000); // 10ms - short delay before retry
+					continue;
+				}
+
 				/* errno 0 can mean EOF, but also can mean ei_receive_msg couldn't decode the message */
 				/* Try to process message from buffer if it has data (similar to macOS compatibility fix) */
 				if (saved_errno == 0) {
-					
+
 					/* Check if buffer has any data at all */
 					/* Even if index is 0, the buffer might have been allocated and contain data */
 					/* Try to peek at the buffer to see if there's data */
 					if (x.index > 0 || (x.buff != NULL && x.buffsz > 0)) {
 						/* Check if buffer actually contains BERT data (starts with 0x83) */
 						int has_bert_data = 0;
-						if (x.index > 0 && x.buff[0] == 0x83) {
+						if (x.index > 0 && (unsigned char)x.buff[0] == 0x83) {
 							has_bert_data = 1;
-						} else if (x.buffsz > 0 && x.buff[0] == 0x83) {
+						} else if (x.buffsz > 0 && (unsigned char)x.buff[0] == 0x83) {
 							has_bert_data = 1;
 							x.index = x.buffsz; /* Use full buffer size */
 						}
-						
+
 						if (has_bert_data) {
 							/* Process the message from buffer */
 							x.index = 0;
@@ -783,22 +799,22 @@ static void main_loop(void) {
 							continue;
 						}
 					}
-					
+
 					/* Buffer is empty or doesn't contain BERT data - try raw read */
 					{
 						/* Buffer is empty but ei_receive_msg failed - try raw read */
 						/* This can happen when ei_receive_msg can't decode the message format */
 						unsigned char raw_buf[4096];
 						ssize_t bytes_read = recv(fd, raw_buf, sizeof(raw_buf), 0);
-						
+
 						if (bytes_read > 0) {
-							
+
 							/* Copy raw data to buffer and try to decode */
 							ei_x_free(&x);
 							ei_x_new(&x);
 							memcpy(x.buff, raw_buf, bytes_read);
 							x.index = bytes_read;
-							
+
 							/* Try to process the message */
 							/* The distribution protocol format is: [4-byte length] [message data] */
 							/* The message data contains: "To Name" + actual BERT message(s) */
@@ -807,7 +823,7 @@ static void main_loop(void) {
 							if (bytes_read >= 4) {
 								/* Check if first 4 bytes are a length header */
 								unsigned long msg_len = (raw_buf[0] << 24) | (raw_buf[1] << 16) | (raw_buf[2] << 8) | raw_buf[3];
-								
+
 								if (msg_len > 0 && msg_len < 1048576) { /* Reasonable message size (1MB max) */
 									/* Look for ALL BERT version bytes (0x83) in the payload */
 									/* The first one is usually in the "To Name" control message */
@@ -827,7 +843,7 @@ static void main_loop(void) {
 											}
 										}
 									}
-									
+
 									if (bert_count > 0) {
 										/* Use the last BERT message found (usually the actual message, after "To Name") */
 										/* Or if only one, use it */
@@ -839,7 +855,7 @@ static void main_loop(void) {
 									}
 								}
 							}
-							
+
 							x.index = decode_index;
 							int process_result = process_message(x.buff, &x.index, fd);
 							ei_x_free(&x);
@@ -904,7 +920,7 @@ static void main_loop(void) {
 						}
 						printf("\n");
 						fflush(stdout);
-						
+
 						if (test_read == 0) {
 							printf("Test CNode: [Conn #%d] Connection closed by peer (EOF)\n", conn_id);
 							fflush(stdout);
@@ -938,13 +954,13 @@ static void main_loop(void) {
 				/* Message received */
 				/* Save buffer size before resetting index */
 				int saved_buffer_index = x.index;
-				
+
 				/* Debug: Check buffer state */
-				printf("Test CNode: [Conn #%d] ERL_MSG received: buffer index=%d, buff=%p, first byte=0x%02x\n", 
-					conn_id, saved_buffer_index, (void*)x.buff, 
+				printf("Test CNode: [Conn #%d] ERL_MSG received: buffer index=%d, buff=%p, first byte=0x%02x\n",
+					conn_id, saved_buffer_index, (void*)x.buff,
 					(saved_buffer_index > 0 && x.buff != NULL) ? (unsigned char)x.buff[0] : 0);
 				fflush(stdout);
-				
+
 				/* Check if this looks like a BERT message (starts with 0x83) */
 				/* IMPORTANT: Check BEFORE resetting index */
 				/* CRITICAL: Cast to unsigned char to avoid sign extension issues */
@@ -953,7 +969,7 @@ static void main_loop(void) {
 					conn_id, saved_buffer_index, (x.buff != NULL ? 1 : 0),
 					(saved_buffer_index > 0 && x.buff != NULL) ? (unsigned char)x.buff[0] : 0, is_bert);
 				fflush(stdout);
-				
+
 				if (is_bert) {
 					printf("Test CNode: [Conn #%d] Message is BERT format, processing...\n", conn_id);
 					fflush(stdout);
@@ -968,7 +984,7 @@ static void main_loop(void) {
 						fflush(stderr);
 						break;
 					}
-					
+
 					/* For GenServer calls, give time for reply to be sent and received */
 					/* Don't close connection immediately - keep it open for potential replies */
 					if (process_result == 0) {
