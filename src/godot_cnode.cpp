@@ -58,7 +58,9 @@ extern ei_socket_callbacks ei_default_socket_callbacks;
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/main_loop.hpp>
 #include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/godot.hpp>
@@ -843,6 +845,70 @@ static Object *get_object_by_id(int64_t object_id) {
 	return obj;
 }
 
+/* Helper: Execute Godot API call using call_deferred() from background thread */
+static void execute_godot_call_deferred(int64_t object_id, const String &method_name, const Array &method_args) {
+	// WARNING: ObjectDB::get_instance() may not be thread-safe!
+	// We need to get the object pointer to call call_deferred() on it
+	// But accessing ObjectDB from background thread might crash
+	// For now, we'll try it but this might need a different approach
+
+	// WARNING: get_object_by_id() calls ObjectDB::get_instance() which may not be thread-safe
+	// This might crash if called from background thread
+	Object *obj = get_object_by_id(object_id);
+
+	if (obj == nullptr) {
+		printf("Godot CNode: execute_godot_call_deferred - Error: Object not found (ID: %lld)\n", object_id);
+		return;
+	}
+
+	// Use call_deferred() to queue the method call on the main thread
+	// call_deferred() is thread-safe and can be called from any thread
+	// We need to unpack the Array arguments to pass to call_deferred()
+	// call_deferred() supports up to 5 arguments, so we handle that many
+
+	if (method_args.size() == 0) {
+		obj->call_deferred(method_name);
+	} else if (method_args.size() == 1) {
+		obj->call_deferred(method_name, method_args[0]);
+	} else if (method_args.size() == 2) {
+		obj->call_deferred(method_name, method_args[0], method_args[1]);
+	} else if (method_args.size() == 3) {
+		obj->call_deferred(method_name, method_args[0], method_args[1], method_args[2]);
+	} else if (method_args.size() == 4) {
+		obj->call_deferred(method_name, method_args[0], method_args[1], method_args[2], method_args[3]);
+	} else if (method_args.size() == 5) {
+		obj->call_deferred(method_name, method_args[0], method_args[1], method_args[2], method_args[3], method_args[4]);
+	} else {
+		// For more than 5 args, use call_deferred with "callv" method
+		// callv() accepts method name and Array of arguments - no limit!
+		obj->call_deferred("callv", method_name, method_args);
+		printf("Godot CNode: execute_godot_call_deferred - Using callv for %lld args\n", (long long)method_args.size());
+	}
+
+	printf("Godot CNode: Queued call_deferred for ObjectID: %lld, Method: %s\n", object_id, method_name.utf8().get_data());
+}
+
+/* Helper: Set property using call_deferred() from background thread */
+static void execute_godot_set_property_deferred(int64_t object_id, const String &property_name, const Variant &value) {
+	// WARNING: ObjectDB::get_instance() may not be thread-safe!
+	// We need to get the object pointer to call call_deferred() on it
+	// But accessing ObjectDB from background thread might crash
+
+	// WARNING: get_object_by_id() calls ObjectDB::get_instance() which may not be thread-safe
+	// This might crash if called from background thread
+	Object *obj = get_object_by_id(object_id);
+
+	if (obj == nullptr) {
+		printf("Godot CNode: execute_godot_set_property_deferred - Error: Object not found (ID: %lld)\n", object_id);
+		return;
+	}
+
+	// Use call_deferred() to queue the set() call on the main thread
+	// set() is a method on Object that takes property name and value
+	obj->call_deferred("set", property_name, value);
+	printf("Godot CNode: Queued call_deferred set for ObjectID: %lld, Property: %s\n", object_id, property_name.utf8().get_data());
+}
+
 /* Helper: Encode method info to BERT */
 static void encode_method_info(const Dictionary &method, ei_x_buff *x) {
 	ei_x_encode_tuple_header(x, 4);
@@ -940,260 +1006,90 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	// Decode arguments (remaining elements in Request tuple)
 	Array args;
 	if (request_arity > 2) {
-		// Skip version - we're already inside a tuple, version was decoded at message level
-		Variant args_array = bert_to_variant(buf, index, true);
-		if (args_array.get_type() == Variant::ARRAY) {
-			args = args_array.operator Array();
+		// Decode args array
+		Variant args_variant = bert_to_variant(buf, index, true); // Skip version, already in tuple
+		if (args_variant.get_type() == Variant::ARRAY) {
+			args = args_variant.operator Array();
+			printf("Godot CNode: handle_call - Decoded args array with %lld elements\n", (long long)args.size());
+		} else {
+			// Single argument, wrap in array
+			args.push_back(args_variant);
+			printf("Godot CNode: handle_call - Decoded single arg, wrapped in array\n");
 		}
+		fflush(stdout);
 	}
 
 	// Route based on module
 	if (strcmp(module, "godot") == 0) {
-		// Generic Godot API calls
+		// Generic Godot API calls - now safe since we're on main thread
 		if (strcmp(function, "call_method") == 0) {
-			// {call, godot, call_method, [ObjectID, MethodName, Args]}
-			if (args.size() < 2) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
+			if (args.size() >= 2) {
 				int64_t object_id = args[0].operator int64_t();
 				String method_name = args[1].operator String();
-
-				// Guard: Check for valid object ID
-				if (object_id == 0) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "invalid_object_id");
-				} else if (method_name.is_empty()) {
-					// Guard: Check method name is not empty
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "empty_method_name");
-				} else {
-					// Godot API calls must be made from the main thread
-					// Use async calls (cast) instead of synchronous calls (call) for Godot API
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "godot_api_calls_require_main_thread_use_cast_instead");
+				Array method_args;
+				if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+					method_args = args[2].operator Array();
 				}
-			}
-		} else if (strcmp(function, "get_property") == 0) {
-			// {call, godot, get_property, [ObjectID, PropertyName]}
-			if (args.size() < 2) {
+
+				// Get object and call method using callv() which supports unlimited arguments
+				Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)object_id));
+				if (obj != nullptr) {
+					Variant result;
+					// Use callv() which accepts an Array of arguments - no limit!
+					result = obj->callv(method_name, method_args);
+
+					// Encode result
+					variant_to_bert(result, &reply);
+				} else {
+					ei_x_encode_tuple_header(&reply, 2);
+					ei_x_encode_atom(&reply, "error");
+					ei_x_encode_string(&reply, "object_not_found");
+				}
+			} else {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
+				ei_x_encode_string(&reply, "insufficient_arguments");
+			}
+		} else if (strcmp(function, "get_property") == 0) {
+			if (args.size() >= 2) {
 				int64_t object_id = args[0].operator int64_t();
 				String prop_name = args[1].operator String();
 
-				// Guard: Check for valid object ID
-				if (object_id == 0) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "invalid_object_id");
-				} else if (prop_name.is_empty()) {
-					// Guard: Check property name is not empty
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "empty_property_name");
+				Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)object_id));
+				if (obj != nullptr) {
+					Variant value = obj->get(prop_name);
+					variant_to_bert(value, &reply);
 				} else {
-					// Godot API calls must be made from the main thread
-					// Use async calls (cast) instead of synchronous calls (call) for Godot API
 					ei_x_encode_tuple_header(&reply, 2);
 					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "godot_api_calls_require_main_thread_use_cast_instead");
+					ei_x_encode_string(&reply, "object_not_found");
 				}
-			}
-		} else if (strcmp(function, "set_property") == 0) {
-			// {call, godot, set_property, [ObjectID, PropertyName, Value]}
-			if (args.size() < 3) {
+			} else {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
+				ei_x_encode_string(&reply, "insufficient_arguments");
+			}
+		} else if (strcmp(function, "set_property") == 0) {
+			if (args.size() >= 3) {
 				int64_t object_id = args[0].operator int64_t();
 				String prop_name = args[1].operator String();
 				Variant value = args[2];
 
-				// Guard: Check for valid object ID
-				if (object_id == 0) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "invalid_object_id");
-				} else if (prop_name.is_empty()) {
-					// Guard: Check property name is not empty
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "empty_property_name");
+				Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)object_id));
+				if (obj != nullptr) {
+					obj->set(prop_name, value);
+					ei_x_encode_atom(&reply, "ok");
 				} else {
-					// Godot API calls must be made from the main thread
-					// Use async calls (cast) instead of synchronous calls (call) for Godot API
 					ei_x_encode_tuple_header(&reply, 2);
 					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "godot_api_calls_require_main_thread_use_cast_instead");
+					ei_x_encode_string(&reply, "object_not_found");
 				}
-			}
-		} else if (strcmp(function, "get_singleton") == 0) {
-			// {call, godot, get_singleton, [SingletonName]}
-			if (args.size() < 1) {
+			} else {
 				ei_x_encode_tuple_header(&reply, 2);
 				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
-				String singleton_name = args[0].operator String();
-				StringName name(singleton_name);
-				GDExtensionObjectPtr singleton_obj = internal::gdextension_interface_global_get_singleton(name._native_ptr());
-				if (singleton_obj == nullptr) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "singleton_not_found");
-				} else {
-					Object *singleton = internal::get_object_instance_binding(singleton_obj);
-					if (singleton == nullptr) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "singleton_binding_failed");
-					} else {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "reply");
-						ei_x_encode_tuple_header(&reply, 3);
-						ei_x_encode_atom(&reply, "object");
-						ei_x_encode_string(&reply, singleton->get_class().utf8().get_data());
-						ei_x_encode_long(&reply, (long)(int64_t)singleton->get_instance_id());
-					}
-				}
+				ei_x_encode_string(&reply, "insufficient_arguments");
 			}
-		} else if (strcmp(function, "create_object") == 0) {
-			// {call, godot, create_object, [ClassName]}
-			if (args.size() < 1) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
-				String class_name = args[0].operator String();
-				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-				if (class_db == nullptr) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "classdb_unavailable");
-				} else {
-					// Use ClassDB to instantiate the class
-					Object *obj = ClassDB::instantiate(StringName(class_name));
-					if (obj == nullptr) {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "error");
-						ei_x_encode_string(&reply, "class_not_found_or_not_instantiable");
-					} else {
-						ei_x_encode_tuple_header(&reply, 2);
-						ei_x_encode_atom(&reply, "reply");
-						ei_x_encode_tuple_header(&reply, 3);
-						ei_x_encode_atom(&reply, "object");
-						ei_x_encode_string(&reply, obj->get_class().utf8().get_data());
-						ei_x_encode_long(&reply, (int64_t)obj->get_instance_id());
-					}
-				}
-			}
-		} else if (strcmp(function, "list_classes") == 0) {
-			// {call, godot, list_classes, []}
-			ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-			if (class_db == nullptr) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "classdb_unavailable");
-			} else {
-				Array classes = class_db->get_class_list();
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "reply");
-				ei_x_encode_list_header(&reply, classes.size());
-				for (int i = 0; i < classes.size(); i++) {
-					String class_name = classes[i];
-					ei_x_encode_string(&reply, class_name.utf8().get_data());
-				}
-				ei_x_encode_empty_list(&reply);
-			}
-		} else if (strcmp(function, "get_class_methods") == 0) {
-			// {call, godot, get_class_methods, [ClassName]}
-			if (args.size() < 1) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
-				String class_name = args[0].operator String();
-				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-				if (class_db == nullptr) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "classdb_unavailable");
-				} else {
-					TypedArray<Dictionary> methods = class_db->class_get_method_list(class_name, true);
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "reply");
-					ei_x_encode_list_header(&reply, methods.size());
-					for (int i = 0; i < methods.size(); i++) {
-						encode_method_info(methods[i], &reply);
-					}
-					ei_x_encode_empty_list(&reply);
-				}
-			}
-		} else if (strcmp(function, "get_class_properties") == 0) {
-			// {call, godot, get_class_properties, [ClassName]}
-			if (args.size() < 1) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "insufficient_args");
-			} else {
-				String class_name = args[0].operator String();
-				ClassDBSingleton *class_db = ClassDBSingleton::get_singleton();
-				if (class_db == nullptr) {
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "error");
-					ei_x_encode_string(&reply, "classdb_unavailable");
-				} else {
-					TypedArray<Dictionary> properties = class_db->class_get_property_list(class_name, true);
-					ei_x_encode_tuple_header(&reply, 2);
-					ei_x_encode_atom(&reply, "reply");
-					ei_x_encode_list_header(&reply, properties.size());
-					for (int i = 0; i < properties.size(); i++) {
-						Dictionary prop = properties[i];
-						// Skip NIL properties (grouping/category markers)
-						if (prop["type"].operator int() != Variant::NIL) {
-							encode_property_info(prop, &reply);
-						}
-					}
-					ei_x_encode_empty_list(&reply);
-				}
-			}
-		} else if (strcmp(function, "get_singletons") == 0) {
-			// {call, godot, get_singletons, []}
-			Engine *engine = Engine::get_singleton();
-			if (engine == nullptr) {
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "error");
-				ei_x_encode_string(&reply, "engine_unavailable");
-			} else {
-				PackedStringArray singletons = engine->get_singleton_list();
-				ei_x_encode_tuple_header(&reply, 2);
-				ei_x_encode_atom(&reply, "reply");
-				ei_x_encode_list_header(&reply, singletons.size());
-				for (int i = 0; i < singletons.size(); i++) {
-					ei_x_encode_string(&reply, singletons[i].utf8().get_data());
-				}
-				ei_x_encode_empty_list(&reply);
-			}
-		} else if (strcmp(function, "get_scene_tree_root") == 0) {
-			// Godot API calls must be made from the main thread
-			ei_x_encode_tuple_header(&reply, 2);
-			ei_x_encode_atom(&reply, "error");
-			ei_x_encode_string(&reply, "godot_api_calls_require_main_thread_use_cast_instead");
-		} else if (strcmp(function, "find_node") == 0) {
-			// Godot API calls must be made from the main thread
-			ei_x_encode_tuple_header(&reply, 2);
-			ei_x_encode_atom(&reply, "error");
-			ei_x_encode_string(&reply, "godot_api_calls_require_main_thread_use_cast_instead");
 		} else {
-			// Unknown function in godot module
 			ei_x_encode_tuple_header(&reply, 2);
 			ei_x_encode_atom(&reply, "error");
 			ei_x_encode_string(&reply, "unknown_function");
@@ -1262,29 +1158,18 @@ static int handle_cast(char *buf, int *index) {
 	}
 
 	// Decode arguments (remaining elements in Request tuple)
-	// For plain messages, args is the third element: {Module, Function, Args}
-	// For GenServer casts, args is directly after $gen_cast: {'$gen_cast', {Module, Function, Args}}
 	Array args;
 	if (request_arity > 2) {
-		// Skip version - we're already inside a tuple, version was decoded at message level
-		Variant args_array = bert_to_variant(buf, index, true);
-		if (args_array.get_type() == Variant::ARRAY) {
-			args = args_array.operator Array();
-			printf("Godot CNode: handle_cast - Decoded args array with %d elements\n", args.size());
-			fflush(stdout);
-		} else if (args_array.get_type() == Variant::NIL) {
-			// Empty list [] decodes as NIL (ERL_NIL_EXT), treat as empty array
-			args = Array();
-			printf("Godot CNode: handle_cast - Empty args list (treating as empty array)\n");
-			fflush(stdout);
+		// Decode args array
+		Variant args_variant = bert_to_variant(buf, index, true); // Skip version, already in tuple
+		if (args_variant.get_type() == Variant::ARRAY) {
+			args = args_variant.operator Array();
+			printf("Godot CNode: handle_cast - Decoded args array with %lld elements\n", (long long)args.size());
 		} else {
-			printf("Godot CNode: handle_cast - Args is not an array (type: %d)\n", args_array.get_type());
-			fflush(stdout);
+			// Single argument, wrap in array
+			args.push_back(args_variant);
+			printf("Godot CNode: handle_cast - Decoded single arg, wrapped in array\n");
 		}
-	} else {
-		// No args provided
-		args = Array();
-		printf("Godot CNode: handle_cast - No args (request_arity: %d)\n", request_arity);
 		fflush(stdout);
 	}
 
@@ -1301,52 +1186,40 @@ static int handle_cast(char *buf, int *index) {
 			printf("Godot CNode: Async erlang:%s - Unknown function\n", function);
 		}
 	} else if (strcmp(module, "godot") == 0) {
+		// Generic Godot API calls - now safe since we're on main thread
 		if (strcmp(function, "call_method") == 0) {
-			// {cast, godot, call_method, [ObjectID, MethodName, Args]}
 			if (args.size() >= 2) {
 				int64_t object_id = args[0].operator int64_t();
 				String method_name = args[1].operator String();
+				Array method_args;
+				if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
+					method_args = args[2].operator Array();
+				}
 
-				// Guard: Check for valid object ID and method name
-				if (object_id != 0 && !method_name.is_empty()) {
-					Array method_args;
-					if (args.size() > 2 && args[2].get_type() == Variant::ARRAY) {
-						method_args = args[2].operator Array();
-					}
-
-					Object *obj = get_object_by_id(object_id);
-					if (obj != nullptr) {
-						printf("Godot CNode: Async godot:call_method - ObjectID: %lld, Method: %s\n", object_id, method_name.utf8().get_data());
-						obj->callv(method_name, method_args);
-						printf("Godot CNode: Async godot:call_method - Success\n");
-					} else {
-						printf("Godot CNode: Async godot:call_method - Error: Object not found (ID: %lld)\n", object_id);
-					}
+				// Get object and call method (async, no return value) using callv() - no argument limit!
+				Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)object_id));
+				if (obj != nullptr) {
+					// Use callv() which accepts an Array of arguments - supports unlimited arguments
+					obj->callv(method_name, method_args);
+					printf("Godot CNode: Async godot:call_method - Success (called with %lld args)\n", (long long)method_args.size());
 				} else {
-					printf("Godot CNode: Async godot:call_method - Error: Invalid arguments\n");
+					printf("Godot CNode: Async godot:call_method - Error: Object not found (ID: %lld)\n", (long long)object_id);
 				}
 			} else {
 				printf("Godot CNode: Async godot:call_method - Error: Insufficient arguments\n");
 			}
 		} else if (strcmp(function, "set_property") == 0) {
-			// {cast, godot, set_property, [ObjectID, PropertyName, Value]}
 			if (args.size() >= 3) {
 				int64_t object_id = args[0].operator int64_t();
 				String prop_name = args[1].operator String();
 				Variant value = args[2];
 
-				// Guard: Check for valid object ID and property name
-				if (object_id != 0 && !prop_name.is_empty()) {
-					Object *obj = get_object_by_id(object_id);
-					if (obj != nullptr) {
-						printf("Godot CNode: Async godot:set_property - ObjectID: %lld, Property: %s\n", object_id, prop_name.utf8().get_data());
-						obj->set(prop_name, value);
-						printf("Godot CNode: Async godot:set_property - Success\n");
-					} else {
-						printf("Godot CNode: Async godot:set_property - Error: Object not found (ID: %lld)\n", object_id);
-					}
+				Object *obj = ObjectDB::get_instance(ObjectID((uint64_t)object_id));
+				if (obj != nullptr) {
+					obj->set(prop_name, value);
+					printf("Godot CNode: Async godot:set_property - Success\n");
 				} else {
-					printf("Godot CNode: Async godot:set_property - Error: Invalid arguments\n");
+					printf("Godot CNode: Async godot:set_property - Error: Object not found (ID: %lld)\n", (long long)object_id);
 				}
 			} else {
 				printf("Godot CNode: Async godot:set_property - Error: Insufficient arguments\n");
@@ -1504,7 +1377,7 @@ void main_loop() {
 		/* Log connection acceptance with timestamp for debugging */
 		struct timeval accept_time;
 		gettimeofday(&accept_time, NULL);
-		printf("Godot CNode: ✓ Accepted connection on fd: %d at %ld.%06ld\n", fd, accept_time.tv_sec, accept_time.tv_usec);
+		printf("Godot CNode: ✓ Accepted connection on fd: %d at %ld.%06d\n", fd, accept_time.tv_sec, accept_time.tv_usec);
 		fflush(stdout);
 		if (con.nodename[0] != '\0') {
 			printf("Godot CNode: Connected from node: %s\n", con.nodename);
@@ -1516,7 +1389,7 @@ void main_loop() {
 		/* Receive message - use select() to wait for data before calling ei_receive_msg */
 		struct timeval wait_start;
 		gettimeofday(&wait_start, NULL);
-		printf("Godot CNode: Waiting to receive message from fd: %d at %ld.%06ld...\n", fd, wait_start.tv_sec, wait_start.tv_usec);
+		printf("Godot CNode: Waiting to receive message from fd: %d at %ld.%06d...\n", fd, wait_start.tv_sec, wait_start.tv_usec);
 		fflush(stdout);
 
 		/* Wait for data to be available using select() */
@@ -1926,4 +1799,314 @@ void main_loop() {
 
 	ei_x_free(&x);
 }
+} // extern "C" - closes main_loop's extern "C" block
+
+/*
+ * Non-blocking version of main_loop for use in Godot's main thread
+ * Processes one connection or message per call, returns immediately if nothing available
+ * Returns: 0 = processed something, 1 = nothing to process, -1 = error/shutdown
+ */
+extern "C" {
+int process_cnode_frame(void) {
+	static ei_x_buff x;
+	static erlang_msg msg;
+	static int current_fd = -1;
+	static bool x_initialized = false;
+
+	// Initialize buffer on first call
+	if (!x_initialized) {
+		ei_x_new(&x);
+		x_initialized = true;
+	}
+
+	// Check if listen_fd is valid
+	if (listen_fd < 0) {
+		return -1; // Shutdown
+	}
+
+	// If we have an active connection, try to process messages on it first
+	if (current_fd >= 0) {
+		// Check if more data is available with zero timeout (non-blocking)
+		fd_set recv_fds;
+		struct timeval recv_timeout;
+		FD_ZERO(&recv_fds);
+		FD_SET(current_fd, &recv_fds);
+		recv_timeout.tv_sec = 0;
+		recv_timeout.tv_usec = 0; // Zero timeout = non-blocking
+		int select_res = select(current_fd + 1, &recv_fds, NULL, NULL, &recv_timeout);
+
+		if (select_res > 0 && FD_ISSET(current_fd, &recv_fds)) {
+			// Data available - try to receive message
+			int res = ei_receive_msg(current_fd, &msg, &x);
+
+			if (res == ERL_TICK) {
+				// Just a tick, continue
+				return 1; // Nothing to process
+			} else if (res == ERL_ERROR) {
+				// Error or connection closed
+				int saved_errno = errno;
+				if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
+					// macOS compatibility - try to process from buffer
+					if (x.index > 0) {
+						x.index = 0;
+						if (process_message(x.buff, &x.index, current_fd) >= 0) {
+							ei_x_free(&x);
+							ei_x_new(&x);
+							return 0; // Processed message
+						}
+					}
+				}
+				// Connection closed or error - close and reset
+				close(current_fd);
+				current_fd = -1;
+				ei_x_free(&x);
+				ei_x_new(&x);
+				return 1; // Nothing more to process
+			} else if (res == ERL_MSG) {
+				// Message received - process it
+				x.index = 0;
+				int process_result = process_message(x.buff, &x.index, current_fd);
+
+				// Free buffer and prepare for next message
+				ei_x_free(&x);
+				ei_x_new(&x);
+
+				if (process_result < 0) {
+					// Error processing - close connection
+					close(current_fd);
+					current_fd = -1;
+					return -1;
+				}
+
+				return 0; // Processed message
+			}
+		} else if (select_res == 0) {
+			// No data available - check if connection is still alive
+			// For now, keep connection open for next frame
+			return 1; // Nothing to process this frame
+		} else {
+			// select() error - close connection
+			close(current_fd);
+			current_fd = -1;
+			ei_x_free(&x);
+			ei_x_new(&x);
+			return 1;
+		}
+	}
+
+	// No active connection - check for new connections (non-blocking)
+	fd_set read_fds;
+	struct timeval timeout;
+	FD_ZERO(&read_fds);
+	FD_SET(listen_fd, &read_fds);
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 0; // Zero timeout = non-blocking
+
+	int select_res = select(listen_fd + 1, &read_fds, NULL, NULL, &timeout);
+
+	if (select_res > 0 && FD_ISSET(listen_fd, &read_fds)) {
+		// New connection available - accept it
+		ErlConnect con;
+		int fd = ei_accept(&ec, listen_fd, &con);
+
+		if (fd >= 0) {
+			printf("Godot CNode: ✓ Accepted connection on fd: %d\n", fd);
+			fflush(stdout);
+			if (con.nodename[0] != '\0') {
+				printf("Godot CNode: Connected from node: %s\n", con.nodename);
+				fflush(stdout);
+			}
+
+			// Store connection for next frame
+			current_fd = fd;
+
+			// Check if data is immediately available
+			FD_ZERO(&read_fds);
+			FD_SET(fd, &read_fds);
+			timeout.tv_sec = 0;
+			timeout.tv_usec = 0;
+			select_res = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+
+			if (select_res > 0 && FD_ISSET(fd, &read_fds)) {
+				// Data immediately available - process it
+				int res = ei_receive_msg(fd, &msg, &x);
+
+				if (res == ERL_MSG) {
+					x.index = 0;
+					int process_result = process_message(x.buff, &x.index, fd);
+					ei_x_free(&x);
+					ei_x_new(&x);
+
+					if (process_result < 0) {
+						close(fd);
+						current_fd = -1;
+						return -1;
+					}
+
+					return 0; // Processed message
+				} else if (res == ERL_TICK) {
+					return 1; // Just a tick
+				} else {
+					// Error - close connection
+					close(fd);
+					current_fd = -1;
+					return 1;
+				}
+			}
+
+			return 0; // Accepted connection
+		} else {
+			// Accept failed - but not critical, just try again next frame
+			int saved_errno = errno;
+			if (saved_errno == EBADF || saved_errno == 9) {
+				// Socket closed - shutdown
+				return -1;
+			}
+			// Other errors - just try again next frame
+			return 1;
+		}
+	}
+
+	// Nothing to process this frame
+	return 1;
+}
 } // extern "C"
+
+// CNodeServer Node class implementation
+namespace godot {
+
+void CNodeServer::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("_add_to_scene_tree"), &CNodeServer::_add_to_scene_tree);
+}
+
+CNodeServer::CNodeServer() : initialized(false), cookie_copy(nullptr) {
+}
+
+CNodeServer::~CNodeServer() {
+	if (cookie_copy != nullptr) {
+		delete[] cookie_copy;
+		cookie_copy = nullptr;
+	}
+}
+
+void CNodeServer::_add_to_scene_tree() {
+	// Add this node to the scene tree
+	Engine *engine = Engine::get_singleton();
+	if (engine == nullptr) {
+		UtilityFunctions::printerr("Godot CNode: Engine not available in _add_to_scene_tree");
+		return;
+	}
+
+	MainLoop *main_loop = engine->get_main_loop();
+	if (main_loop == nullptr) {
+		UtilityFunctions::printerr("Godot CNode: Main loop not available in _add_to_scene_tree");
+		return;
+	}
+
+	SceneTree *scene_tree = Object::cast_to<SceneTree>(main_loop);
+	if (scene_tree == nullptr) {
+		UtilityFunctions::printerr("Godot CNode: SceneTree not available in _add_to_scene_tree");
+		return;
+	}
+
+	// Add to root window
+	Window *root = scene_tree->get_root();
+	if (root != nullptr && get_parent() == nullptr) {
+		root->add_child(this);
+		UtilityFunctions::print("Godot CNode: CNodeServer node added to root window");
+	} else if (get_parent() == nullptr) {
+		// Try current scene as fallback
+		Node *current_scene = scene_tree->get_current_scene();
+		if (current_scene != nullptr) {
+			current_scene->add_child(this);
+			UtilityFunctions::print("Godot CNode: CNodeServer node added to current scene");
+		} else {
+			UtilityFunctions::printerr("Godot CNode: Could not add CNodeServer node to scene tree");
+		}
+	}
+}
+
+void CNodeServer::_ready() {
+	// Initialize CNode on main thread
+	UtilityFunctions::print("Godot CNode: CNodeServer node ready, initializing CNode...");
+
+	// Get cookie from environment or use default
+	String cookie;
+	OS *os = OS::get_singleton();
+	if (os) {
+		String env_cookie = os->get_environment("GODOT_CNODE_COOKIE");
+		if (!env_cookie.is_empty()) {
+			cookie = env_cookie.strip_edges();
+			UtilityFunctions::print("Godot CNode: Using cookie from GODOT_CNODE_COOKIE environment variable");
+		}
+	}
+
+	if (cookie.is_empty()) {
+		// Use default cookie
+		cookie = "godotcookie";
+		UtilityFunctions::print("Godot CNode: Using default cookie");
+	}
+
+	// Store cookie as C string
+	size_t cookie_len = cookie.length();
+	cookie_copy = new char[cookie_len + 1];
+	memcpy(cookie_copy, cookie.utf8().get_data(), cookie_len);
+	cookie_copy[cookie_len] = '\0';
+
+	// Initialize instances array
+	memset(instances, 0, sizeof(instances));
+
+	// Try different hostname options
+	char hostname[256] = { 0 };
+	char nodename[512] = { 0 };
+	const char *nodename_options[4];
+	int option_count = 0;
+
+	nodename_options[option_count++] = "godot@127.0.0.1";
+	nodename_options[option_count++] = "godot@localhost";
+
+#ifndef _WIN32
+	if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+		if (strlen(hostname) > 6 && strcmp(hostname + strlen(hostname) - 6, ".local") != 0) {
+			snprintf(nodename, sizeof(nodename), "godot@%s", hostname);
+			nodename_options[option_count++] = nodename;
+		}
+	}
+#endif
+	nodename_options[option_count] = nullptr;
+
+	bool init_success = false;
+	for (int i = 0; nodename_options[i] != nullptr; i++) {
+		if (init_cnode(const_cast<char *>(nodename_options[i]), cookie_copy) == 0) {
+			init_success = true;
+			UtilityFunctions::print(String("Godot CNode: Successfully initialized with ") + nodename_options[i]);
+			break;
+		}
+	}
+
+	if (!init_success) {
+		UtilityFunctions::printerr("Godot CNode: Failed to initialize CNode with all hostname options");
+		return;
+	}
+
+	initialized = true;
+	UtilityFunctions::print(String("Godot CNode: CNodeServer initialized and ready (listen_fd: ") + itos(listen_fd) + ")");
+}
+
+void CNodeServer::_process(double delta) {
+	if (!initialized || listen_fd < 0) {
+		return;
+	}
+
+	// Process one frame of CNode operations (non-blocking)
+	int result = process_cnode_frame();
+
+	// result: 0 = processed something, 1 = nothing to process, -1 = error/shutdown
+	if (result < 0) {
+		// Error or shutdown
+		UtilityFunctions::printerr("Godot CNode: process_cnode_frame() returned error, shutting down");
+		initialized = false;
+	}
+}
+
+} // namespace godot

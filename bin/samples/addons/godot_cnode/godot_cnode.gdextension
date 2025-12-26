@@ -5,7 +5,7 @@ compatibility_minimum = 4.1
 
 [libraries]
 
-macos.debug = "bin/libgodot_cnode.macos.template_release.arm64.framework"
+macos.debug = "bin/libgodot_cnode.macos.template_debug.universal.framework"
 macos.release = "bin/libgodot_cnode.macos.template_release.arm64.framework"
 macos.debug.double = "bin/libgodot_cnode.macos.template_release.double.arm64.framework"
 macos.release.double = "bin/libgodot_cnode.macos.template_release.double.arm64.framework"

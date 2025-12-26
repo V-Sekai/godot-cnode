@@ -4,28 +4,23 @@
 #include <godot_cpp/classes/crypto.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/window.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/memory.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
-#ifndef _WIN32
-#include <pthread.h>
-#include <unistd.h>
-#else
-#include <process.h>
-#include <windows.h>
-typedef HANDLE pthread_t;
-#endif
 #include <cstdio>
 #include <cstring>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
-// CNode server thread management
-static pthread_t cnode_thread = 0;
-static bool cnode_running = false;
-// Store cookie as C string to avoid Godot API initialization issues
-static char cnode_cookie[256] = { 0 }; // Cookie prepared on main thread, stored as C string
+// CNode server node management (runs on main thread)
+static godot::Node *cnode_server_node = nullptr;
 
 // Forward declarations from godot_cnode.cpp
 extern "C" {
@@ -35,6 +30,8 @@ extern int next_instance_id;
 int init_cnode(char *nodename, char *cookie);
 void main_loop(void);
 }
+
+// CNodeServer class is defined in godot_cnode.h
 
 // Generate a cryptographically secure random string using Godot's Crypto class
 // Must be called on the main thread
@@ -133,164 +130,32 @@ static String read_or_generate_godot_cnode_cookie() {
 	return new_cookie;
 }
 
-// CNode server thread function (NO Godot API calls allowed here!)
-static void *cnode_server_thread_impl(void *userdata) {
-	// Get cookie from userdata (plain C string passed as void*)
-	const char *cookie = static_cast<const char *>(userdata);
-
-	// Initialize instances array
-	memset(instances, 0, sizeof(instances));
-
-	// Use localhost first since it's more reliable than .local hostnames
-	// .local hostnames (mDNS) may not resolve correctly in all network configurations
-	printf("Godot CNode GDExtension: Starting server thread...\n");
-	printf("  Cookie: %s\n", cookie);
-
-	// Try different hostname options in order of preference
-	// Use 127.0.0.1 first since Erlang requires fully qualified hostnames
-	// and "localhost" may be rejected by some Erlang configurations
-	char hostname[256] = { 0 };
-	char nodename[512] = { 0 };
-	const char *nodename_options[4]; // Max 4 options
-	int option_count = 0;
-
-	// Use 127.0.0.1 first (fully qualified, always works)
-	nodename_options[option_count++] = "godot@127.0.0.1";
-	// Also try localhost (may not work if Erlang requires FQDN)
-	nodename_options[option_count++] = "godot@localhost";
-
-	// Also try actual hostname if it's not .local (which may not resolve)
-#ifndef _WIN32
-	if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
-		// Only use hostname if it doesn't end in .local (which may not resolve)
-		if (strlen(hostname) > 6 && strcmp(hostname + strlen(hostname) - 6, ".local") != 0) {
-			snprintf(nodename, sizeof(nodename), "godot@%s", hostname);
-			nodename_options[option_count++] = nodename;
-		}
-	}
-#endif
-	nodename_options[option_count] = nullptr;
-
-	printf("  Trying node names in order:");
-	for (int i = 0; i < option_count; i++) {
-		printf(" %s", nodename_options[i]);
-		if (i < option_count - 1)
-			printf(",");
-	}
-	printf("\n");
-
-	bool initialized = false;
-	for (int i = 0; nodename_options[i] != nullptr; i++) {
-		if (init_cnode(const_cast<char *>(nodename_options[i]), const_cast<char *>(cookie)) == 0) {
-			initialized = true;
-			if (i > 0) {
-				printf("Godot CNode: Successfully initialized with %s (fallback option %d)\n", nodename_options[i], i);
-			}
-			break;
-		} else {
-			fprintf(stderr, "Failed to initialize CNode with %s", nodename_options[i]);
-			if (nodename_options[i + 1] != nullptr) {
-				fprintf(stderr, ", trying next option...\n");
-			} else {
-				fprintf(stderr, "\n");
-			}
-		}
-	}
-
-	if (!initialized) {
-		fprintf(stderr, "Failed to initialize CNode with all hostname options\n");
-		cnode_running = false;
-		delete[] static_cast<char *>(userdata); // Clean up cookie string
-		return nullptr;
-	}
-
-	printf("Godot CNode GDExtension: Published and ready (listen_fd: %d)\n", listen_fd);
-
-	cnode_running = true;
-
-	// Enter main loop
-	main_loop();
-
-	cnode_running = false;
-
-	// Cleanup: clear all instances
-	for (int i = 0; i < MAX_INSTANCES; i++) {
-		if (instances[i].id != 0) {
-			// Note: In GDExtension, we don't destroy Godot instances
-			// The instances array is just for tracking
-			instances[i].id = 0;
-			instances[i].scene_tree = nullptr;
-			instances[i].started = 0;
-		}
-	}
-
-	delete[] static_cast<char *>(userdata); // Clean up cookie string
-	return nullptr;
-}
-
-#ifdef _WIN32
-// Windows thread wrapper
-static unsigned __stdcall cnode_server_thread_win(void *userdata) {
-	cnode_server_thread_impl(userdata);
-	return 0;
-}
-#else
-// Unix thread function (pthread)
-static void *cnode_server_thread(void *userdata) {
-	return cnode_server_thread_impl(userdata);
-}
-#endif
-
 void initialize_cnode_module(ModuleInitializationLevel p_level) {
-	// Don't use ANY Godot APIs during initialization - they may crash
-	// We'll start the server later when it's safe to use Godot APIs
-	// For now, just use a default cookie from environment variable (C standard library only)
+	using namespace godot;
 
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
 
-	// Use only C standard library - no Godot APIs!
-	// Try to read cookie from environment variable
-	const char *env_cookie = getenv("GODOT_CNODE_COOKIE");
-	if (env_cookie && strlen(env_cookie) > 0) {
-		size_t len = strlen(env_cookie);
-		if (len >= sizeof(cnode_cookie)) {
-			len = sizeof(cnode_cookie) - 1;
-		}
-		memcpy(cnode_cookie, env_cookie, len);
-		cnode_cookie[len] = '\0';
+	// Register CNodeServer class
+	ClassDB::register_class<CNodeServer>();
+
+	// Create CNodeServer node
+	CNodeServer *cnode_server = memnew(CNodeServer);
+	cnode_server->set_name("CNodeServer");
+	cnode_server_node = cnode_server;
+
+	// Use Engine's call_deferred to add node when scene tree is ready
+	// This ensures the scene tree is fully initialized
+	Engine *engine = Engine::get_singleton();
+	if (engine != nullptr) {
+		// Use call_deferred with method name string
+		cnode_server->call_deferred("_add_to_scene_tree");
+		UtilityFunctions::print("Godot CNode: CNodeServer node created, will be added to scene tree deferred");
 	} else {
-		// Use default cookie - will be replaced later when Godot APIs are available
-		strncpy(cnode_cookie, "godotcookie", sizeof(cnode_cookie) - 1);
-		cnode_cookie[sizeof(cnode_cookie) - 1] = '\0';
-	}
-
-	// Start server with the cookie we have (no Godot API calls)
-	if (!cnode_running && cnode_thread == 0) {
-		// Create a copy of the cookie for the thread
-		size_t cookie_len = strlen(cnode_cookie);
-		char *cookie_copy = new char[cookie_len + 1];
-		memcpy(cookie_copy, cnode_cookie, cookie_len + 1);
-
-#ifndef _WIN32
-		// Use pthread on Unix-like systems
-		if (pthread_create(&cnode_thread, nullptr, cnode_server_thread, cookie_copy) != 0) {
-			delete[] cookie_copy;
-			return;
-		}
-		// Thread will be joined in uninitialize_cnode_module
-#else
-		// Windows: use _beginthreadex
-		unsigned int thread_id;
-		cnode_thread = (pthread_t)_beginthreadex(nullptr, 0, cnode_server_thread_win, cookie_copy, 0, &thread_id);
-		if (cnode_thread == 0) {
-			delete[] cookie_copy;
-			return;
-		}
-#endif
-		// Server started successfully (using printf since we can't use Godot APIs yet)
-		printf("Godot CNode GDExtension: Server thread started (using cookie from environment or default)\n");
+		UtilityFunctions::printerr("Godot CNode: Engine singleton not available");
+		memdelete(cnode_server);
+		cnode_server_node = nullptr;
 	}
 }
 
@@ -301,29 +166,27 @@ void uninitialize_cnode_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 
-	// Stop CNode server
-	if (cnode_running && cnode_thread != 0) {
-		UtilityFunctions::print("Godot CNode GDExtension: Stopping server thread...");
-		// Close listen_fd to break out of main_loop
+	// Clean up CNodeServer node
+	if (cnode_server_node != nullptr) {
+		UtilityFunctions::print("Godot CNode GDExtension: Removing CNodeServer node...");
+
+		// Close listen_fd to stop accepting connections
 		if (listen_fd >= 0) {
 			close(listen_fd);
 			listen_fd = -1;
 		}
 
-		// Wait for thread to finish
-#ifndef _WIN32
-		if (cnode_thread != 0) {
-			pthread_join(cnode_thread, nullptr);
-			cnode_thread = 0;
+		// Remove node from scene tree
+		Node *node = Object::cast_to<Node>(cnode_server_node);
+		if (node != nullptr && node->get_parent() != nullptr) {
+			node->get_parent()->remove_child(node);
 		}
-#else
-		if (cnode_thread != 0) {
-			WaitForSingleObject(cnode_thread, INFINITE);
-			CloseHandle(cnode_thread);
-			cnode_thread = 0;
-		}
-#endif
-		UtilityFunctions::print("Godot CNode GDExtension: Server thread stopped");
+
+		// Delete the node
+		memdelete(cnode_server_node);
+		cnode_server_node = nullptr;
+
+		UtilityFunctions::print("Godot CNode GDExtension: CNodeServer node removed");
 	}
 }
 

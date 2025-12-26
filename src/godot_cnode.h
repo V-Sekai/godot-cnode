@@ -26,7 +26,33 @@ extern int next_instance_id;
 
 int init_cnode(char *nodename, char *cookie);
 void main_loop(void);
+int process_cnode_frame(void); // Non-blocking version for main thread
 
 #ifdef __cplusplus
 }
+
+// CNodeServer Node class - runs on main thread
+namespace godot {
+class CNodeServer : public Node {
+	GDCLASS(CNodeServer, Node);
+
+private:
+	bool initialized;
+	char *cookie_copy;
+
+protected:
+	static void _bind_methods();
+
+public:
+	CNodeServer();
+	~CNodeServer();
+
+	void _ready() override;
+	void _process(double delta) override;
+
+	// Called deferred to add node to scene tree
+	void _add_to_scene_tree();
+};
+} // namespace godot
+
 #endif
