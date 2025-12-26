@@ -898,6 +898,8 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	/* Decode Request: {Module, Function, Args} */
 	int request_arity;
 	if (ei_decode_tuple_header(buf, index, &request_arity) < 0 || request_arity < 2) {
+		printf("Godot CNode: handle_call - Failed to decode Request tuple header (index: %d)\n", *index);
+		fflush(stdout);
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_request_format");
@@ -911,6 +913,8 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	char function[256];
 
 	if (ei_decode_atom(buf, index, module) < 0) {
+		printf("Godot CNode: handle_call - Failed to decode Module (index: %d)\n", *index);
+		fflush(stdout);
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_module");
@@ -920,6 +924,8 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 	}
 
 	if (ei_decode_atom(buf, index, function) < 0) {
+		printf("Godot CNode: handle_call - Failed to decode Function (index: %d)\n", *index);
+		fflush(stdout);
 		ei_x_encode_tuple_header(&reply, 2);
 		ei_x_encode_atom(&reply, "error");
 		ei_x_encode_string(&reply, "invalid_function");
@@ -927,6 +933,9 @@ static int handle_call(char *buf, int *index, int fd, erlang_pid *from_pid, erla
 		ei_x_free(&reply);
 		return -1;
 	}
+
+	printf("Godot CNode: handle_call - Decoded Request: Module=%s, Function=%s, Arity=%d\n", module, function, request_arity);
+	fflush(stdout);
 
 	// Decode arguments (remaining elements in Request tuple)
 	Array args;
@@ -1380,7 +1389,9 @@ static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag
 	/* Encode GenServer-style reply: {Tag, Reply} */
 	/* The reply buffer (x) already contains the reply data, we need to wrap it with the tag */
 	ei_x_buff gen_reply;
-	ei_x_new(&gen_reply);
+	/* Use ei_x_new_with_version to ensure BERT version byte (0x83) is included */
+	/* This is required for ei_send to work correctly */
+	ei_x_new_with_version(&gen_reply);
 
 	/* Encode tuple header for {Tag, Reply} */
 	ei_x_encode_tuple_header(&gen_reply, 2);
@@ -1389,19 +1400,32 @@ static void send_reply(ei_x_buff *x, int fd, erlang_pid *to_pid, erlang_ref *tag
 	ei_x_encode_ref(&gen_reply, tag_ref);
 
 	/* Append the reply data (which is already encoded in x) */
+	/* Note: x->buff may or may not have version byte, but we're appending the encoded data */
 	ei_x_append_buf(&gen_reply, x->buff, x->index);
+
+	/* Debug: Print hex dump of reply buffer */
+	printf("Godot CNode: Reply buffer (hex, first 64 bytes): ");
+	for (int i = 0; i < gen_reply.index && i < 64; i++) {
+		printf("%02x ", (unsigned char)gen_reply.buff[i]);
+	}
+	printf("\n");
+	fflush(stdout);
 
 	/* Send the GenServer-style reply to the From PID */
 	/* Use ei_send to send to a specific PID on the connected socket */
 	/* Format: ei_send(fd, pid, buf, len) */
-	if (ei_send(fd, to_pid, gen_reply.buff, gen_reply.index) < 0) {
+	/* Note: ei_send handles the distribution protocol automatically, but the buffer should be a valid BERT term */
+	/* The buffer should start with BERT version byte (0x83) which ei_x_new_with_version adds */
+	int send_result = ei_send(fd, to_pid, gen_reply.buff, gen_reply.index);
+	if (send_result < 0) {
 		fprintf(stderr, "Error sending reply (errno: %d, %s)\n", errno, strerror(errno));
+		fflush(stderr);
 	} else {
-		printf("Godot CNode: Reply sent successfully (GenServer format)\n");
+		printf("Godot CNode: Reply sent successfully (GenServer format, %d bytes)\n", gen_reply.index);
 		/* Flush the socket to ensure reply is sent immediately */
 		fflush(stdout);
-		/* Give the socket a moment to send the data */
-		usleep(10000); // 10ms
+		/* Give the socket more time to send the data and for client to receive */
+		usleep(100000); // 100ms - increased from 10ms
 	}
 
 	ei_x_free(&gen_reply);
@@ -1477,7 +1501,10 @@ void main_loop() {
 			}
 		}
 
-		printf("Godot CNode: ✓ Accepted connection on fd: %d\n", fd);
+		/* Log connection acceptance with timestamp for debugging */
+		struct timeval accept_time;
+		gettimeofday(&accept_time, NULL);
+		printf("Godot CNode: ✓ Accepted connection on fd: %d at %ld.%06ld\n", fd, accept_time.tv_sec, accept_time.tv_usec);
 		fflush(stdout);
 		if (con.nodename[0] != '\0') {
 			printf("Godot CNode: Connected from node: %s\n", con.nodename);
@@ -1487,7 +1514,9 @@ void main_loop() {
 		fflush(stdout);
 
 		/* Receive message - use select() to wait for data before calling ei_receive_msg */
-		printf("Godot CNode: Waiting to receive message from fd: %d...\n", fd);
+		struct timeval wait_start;
+		gettimeofday(&wait_start, NULL);
+		printf("Godot CNode: Waiting to receive message from fd: %d at %ld.%06ld...\n", fd, wait_start.tv_sec, wait_start.tv_usec);
 		fflush(stdout);
 
 		/* Wait for data to be available using select() */
@@ -1498,7 +1527,8 @@ void main_loop() {
 		recv_timeout.tv_sec = 5; /* 5 second timeout */
 		recv_timeout.tv_usec = 0;
 		int select_res = select(fd + 1, &recv_fds, NULL, NULL, &recv_timeout);
-		if (select_res > 0 && FD_ISSET(fd, &recv_fds)) {
+		bool data_available = (select_res > 0 && FD_ISSET(fd, &recv_fds));
+		if (data_available) {
 			/* Data is available, try to receive */
 			printf("Godot CNode: select() indicates data available, calling ei_receive_msg...\n");
 			fflush(stdout);
@@ -1528,13 +1558,15 @@ void main_loop() {
 		} else if (res == ERL_ERROR) {
 			int saved_errno = errno;
 			fprintf(stderr, " (ERL_ERROR - errno: %d, %s)\n", saved_errno, strerror(saved_errno));
-			/* macOS issue: errno 42 (Protocol not available) - try to process from existing buffer */
-			if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
+			/* macOS issue: errno 42 (Protocol not available) or errno 60 (Operation timed out) */
+			/* When ei_receive_msg fails, try raw read - the error might just mean ei_receive_msg couldn't decode it */
+			/* Note: errno 60 can occur even when data is available - ei_receive_msg just couldn't decode it */
+			if (saved_errno == 42 || saved_errno == ENOPROTOOPT || saved_errno == 60 || saved_errno == ETIMEDOUT) {
 				/* Try to process message from existing buffer if it has data */
-				printf("Godot CNode: Buffer index: %d, attempting to process message despite errno 42\n", x.index);
+				printf("Godot CNode: Buffer index: %d, attempting to process message despite errno %d (data_available=%d)\n", x.index, saved_errno, data_available);
 				fflush(stdout);
 				if (x.index > 0) {
-					printf("Godot CNode: Attempting to process message despite errno 42 (macOS compatibility)\n");
+					printf("Godot CNode: Attempting to process message from buffer (macOS compatibility, errno %d)\n", saved_errno);
 					fflush(stdout);
 					/* Process the message from buffer */
 					x.index = 0;
@@ -1545,8 +1577,9 @@ void main_loop() {
 					close(fd);
 					continue;
 				} else {
-					/* Buffer is empty but select() said data was available - try raw read */
-					printf("Godot CNode: Buffer is empty but select() indicated data, trying raw read...\n");
+					/* Buffer is empty but ei_receive_msg failed - try raw read anyway */
+					/* Even if select() didn't indicate data, the error might mean there's data ei_receive_msg couldn't decode */
+					printf("Godot CNode: Buffer is empty but ei_receive_msg failed, trying raw read (errno %d)...\n", saved_errno);
 					fflush(stdout);
 					unsigned char raw_buf[4096];
 					ssize_t bytes_read = read(fd, raw_buf, sizeof(raw_buf));
@@ -1577,7 +1610,7 @@ void main_loop() {
 							}
 						}
 						base64_buf[base64_len] = '\0';
-						printf("Godot CNode: Raw data (base64): %s\n", base64_buf);
+						printf("Godot CNode: Raw data (base64, FULL BUFFER): %s\n", base64_buf);
 						fflush(stdout);
 
 						/* Also print hex dump of first 64 bytes for inspection */
@@ -1586,6 +1619,19 @@ void main_loop() {
 							printf("%02x ", raw_buf[i]);
 						}
 						printf("\n");
+						fflush(stdout);
+
+						/* Print full hex dump for debugging */
+						printf("Godot CNode: Raw data (hex, FULL BUFFER, %zd bytes):\n", bytes_read);
+						for (ssize_t i = 0; i < bytes_read; i++) {
+							if (i % 16 == 0) {
+								printf("%04zx: ", i);
+							}
+							printf("%02x ", raw_buf[i]);
+							if (i % 16 == 15 || i == bytes_read - 1) {
+								printf("\n");
+							}
+						}
 						fflush(stdout);
 
 						/* The raw data is in Erlang distribution protocol format */
@@ -1597,29 +1643,50 @@ void main_loop() {
 							/* We need to skip the "To Name" to get to the actual message */
 							int offset = 5; /* Skip header */
 
-							/* Try to find where the actual message starts by looking for the second BERT version (0x83) */
-							/* The first 0x83 is the "To Name", the second is the actual message */
+							/* Try to find ALL messages in the buffer */
+							/* The distribution protocol format is: [4-byte length] [1-byte 'p'] [To Name] [Message] */
+							/* The "To Name" is encoded as an atom (starts with 0x83), then the actual message follows */
 							/* Look for pattern: 0x83 followed by 0x68 (small tuple) or 0x6B (large tuple) */
-							int msg_start = -1;
-							int bert_found = 0;
-							for (int i = offset; i < bytes_read - 2; i++) {
+							/* Find all occurrences and process each message */
+							printf("Godot CNode: Searching for all messages in buffer (size: %zd bytes, offset: %d)\n", bytes_read, offset);
+							fflush(stdout);
+
+							/* Find all 0x83 bytes that are followed by tuple markers */
+							int msg_starts[10]; /* Max 10 messages */
+							int msg_count = 0;
+							for (int i = offset; i < bytes_read - 2 && msg_count < 10; i++) {
 								if (raw_buf[i] == 0x83) {
-									bert_found++;
 									/* Check if this is followed by a tuple marker (0x68 = small tuple, 0x6B = large tuple) */
 									if ((raw_buf[i + 1] == 0x68 || raw_buf[i + 1] == 0x6B)) {
-										/* This could be the message - but we want the second occurrence */
-										if (bert_found == 2) {
-											msg_start = i;
-											printf("Godot CNode: Found second BERT term at offset %d (hex: 0x%02x 0x%02x)\n", i, raw_buf[i], raw_buf[i + 1]);
-											fflush(stdout);
-											break;
-										}
+										msg_starts[msg_count] = i;
+										printf("Godot CNode: Found potential message at offset %d (hex: 0x%02x 0x%02x), message #%d\n",
+												i, raw_buf[i], raw_buf[i + 1], msg_count + 1);
+										fflush(stdout);
+										msg_count++;
 									}
 								}
 							}
 
-							if (msg_start > 0) {
-								int payload_len = (int)bytes_read - msg_start;
+							printf("Godot CNode: Found %d potential message(s) in buffer\n", msg_count);
+							fflush(stdout);
+
+							/* Process each message found */
+							/* The first one (offset 5) is the "To Name" atom, skip it */
+							/* The rest are actual messages */
+							for (int msg_idx = 1; msg_idx < msg_count; msg_idx++) {
+								int msg_start = msg_starts[msg_idx];
+								printf("Godot CNode: Processing message #%d at offset %d\n", msg_idx, msg_start);
+								fflush(stdout);
+
+								/* Calculate payload length - from this message to end of buffer or next message */
+								int payload_len;
+								if (msg_idx + 1 < msg_count) {
+									/* Next message starts at msg_starts[msg_idx + 1] */
+									payload_len = msg_starts[msg_idx + 1] - msg_start;
+								} else {
+									/* Last message - goes to end of buffer */
+									payload_len = (int)bytes_read - msg_start;
+								}
 								printf("Godot CNode: Found message at offset %d, extracted %d bytes, attempting to decode...\n", msg_start, payload_len);
 								fflush(stdout);
 
@@ -1743,13 +1810,18 @@ void main_loop() {
 										continue;
 									}
 									/* Now handle the Request */
+									printf("Godot CNode: About to call handle_call for raw message (From PID: %s, Tag: %p)\n",
+											from_pid.node, (void *)&tag_ref);
+									fflush(stdout);
 									int call_result = handle_call(raw_x.buff, &raw_x.index, fd, &from_pid, &tag_ref);
 									if (call_result < 0) {
 										fprintf(stderr, "Error handling call from raw message\n");
 										fflush(stderr);
 									} else {
-										/* GenServer call succeeded - give time for reply to be sent */
-										usleep(50000); // 50ms
+										printf("Godot CNode: handle_call succeeded for raw message, reply should have been sent\n");
+										fflush(stdout);
+										/* GenServer call succeeded - give more time for reply to be sent and received */
+										usleep(200000); // 200ms - increased from 50ms
 									}
 								} else if (strcmp(first_atom, "rex") == 0) {
 									/* RPC wrapped: {rex, From, {'$gen_call', ...}} */
@@ -1762,8 +1834,8 @@ void main_loop() {
 										fprintf(stderr, "Error processing rex message from raw read payload\n");
 										fflush(stderr);
 									} else {
-										/* GenServer call succeeded - give time for reply to be sent */
-										usleep(50000); // 50ms
+										/* GenServer call succeeded - give more time for reply to be sent and received */
+										usleep(200000); // 200ms - increased from 50ms
 									}
 								} else {
 									fprintf(stderr, "Error: Unknown message type in raw message: %s\n", first_atom);
@@ -1771,8 +1843,18 @@ void main_loop() {
 								}
 
 								ei_x_free(&raw_x);
+								printf("Godot CNode: Finished processing message #%d\n", msg_idx);
+								fflush(stdout);
+							}
+
+							if (msg_count == 0) {
+								printf("Godot CNode: Could not find any messages (BERT version 0x83) in payload\n");
+								fflush(stdout);
+							} else if (msg_count == 1) {
+								printf("Godot CNode: Found only 'To Name', no actual messages in buffer\n");
+								fflush(stdout);
 							} else {
-								printf("Godot CNode: Could not find message start (BERT version 0x83) in payload\n");
+								printf("Godot CNode: Processed %d message(s) from buffer (skipped 'To Name')\n", msg_count - 1);
 								fflush(stdout);
 							}
 						} else {
@@ -1787,11 +1869,14 @@ void main_loop() {
 			}
 			ei_x_free(&x);
 			/* Give additional time for reply to be fully transmitted before closing */
-			usleep(100000); // 100ms
+			usleep(200000); // 200ms - increased from 100ms
 			close(fd);
 			continue;
 		} else {
-			printf(" (success)\n");
+			struct timeval receive_time;
+			gettimeofday(&receive_time, NULL);
+			long elapsed_us = (receive_time.tv_sec - wait_start.tv_sec) * 1000000 + (receive_time.tv_usec - wait_start.tv_usec);
+			printf(" (success, elapsed: %ld us)\n", elapsed_us);
 		}
 
 		printf("Godot CNode: Message type: %ld\n", msg.msgtype);
@@ -1803,14 +1888,40 @@ void main_loop() {
 			fprintf(stderr, "Error processing message\n");
 		}
 
-		/* For GenServer calls, give time for reply to be sent before closing */
-		/* Plain messages are async, so we can close immediately */
+		/* For GenServer calls, give time for reply to be sent */
 		if (process_result == 0) {
-			/* Small delay to ensure reply is fully sent for GenServer calls */
-			usleep(50000); // 50ms
+			/* Longer delay to ensure reply is fully sent and received for GenServer calls */
+			usleep(200000); // 200ms - increased from 50ms
 		}
 
-		close(fd);
+		/* Process multiple messages on the same connection */
+		/* According to Erlang distribution protocol, multiple messages can be sent on the same connection */
+		/* Continue receiving messages until select() times out or connection closes */
+		printf("Godot CNode: Checking for more messages on this connection...\n");
+		fflush(stdout);
+
+		/* Free the current buffer and prepare for next message */
+		ei_x_free(&x);
+		ei_x_new(&x);
+
+		/* Check if more data is available with a short timeout */
+		FD_ZERO(&recv_fds);
+		FD_SET(fd, &recv_fds);
+		recv_timeout.tv_sec = 0; /* No wait - check immediately */
+		recv_timeout.tv_usec = 100000; /* 100ms */
+		select_res = select(fd + 1, &recv_fds, NULL, NULL, &recv_timeout);
+		if (select_res > 0 && FD_ISSET(fd, &recv_fds)) {
+			/* More data available - continue processing */
+			printf("Godot CNode: More data available, continuing to receive...\n");
+			fflush(stdout);
+			continue; /* Go back to receive next message */
+		} else {
+			/* No more data - close connection */
+			printf("Godot CNode: No more data available, closing connection\n");
+			fflush(stdout);
+			ei_x_free(&x);
+			close(fd);
+		}
 	}
 
 	ei_x_free(&x);

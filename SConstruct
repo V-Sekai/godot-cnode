@@ -198,4 +198,7 @@ else:
         source=sources,
     )
 
+# Test programs
+test_timing = env.Program("test/test_simple_timing", ["test/test_simple_timing.c"], LIBS=erl_libs, LIBPATH=erl_lib_paths, CPPPATH=erl_include_paths)
+
 Default(library)
