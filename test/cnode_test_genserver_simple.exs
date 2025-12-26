@@ -7,7 +7,7 @@ case :net_kernel.connect_node(:"godot@127.0.0.1") do
     IO.puts("✓ Connected to CNode")
     from = self()
     ref = make_ref()
-    gen_call = {'$gen_call', {from, ref}, {:erlang, :node, []}}
+    gen_call = {:"$gen_call", {from, ref}, {:erlang, :node, []}}
     :erlang.send({:godot_server, :"godot@127.0.0.1"}, gen_call)
 
     receive do

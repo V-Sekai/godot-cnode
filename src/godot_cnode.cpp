@@ -659,10 +659,6 @@ int init_cnode(char *nodename, char *cookie) {
 		return -1;
 	}
 
-	/* BINARY SEARCH: Test 1 - Minimal configuration (no socket options) */
-	/* Test if ei_accept() works with socket as-is from ei_listen() */
-	printf("Godot CNode: BINARY SEARCH Test 1: No socket options set\n");
-
 	printf("Godot CNode: Socket ready for accepting connections (fd: %d, port: %d)\n", listen_fd, port);
 	return 0;
 }
@@ -1386,6 +1382,22 @@ void main_loop() {
 		}
 		fflush(stdout);
 
+		// Register global name "godot_server" so Erlang processes can send messages to it
+		// This must be done after accepting a connection (global names require a connection to an Erlang node)
+		// According to: https://www.erlang.org/doc/apps/erl_interface/ei_users_guide.html#using-global-names
+		static bool name_registered_main = false;
+		if (!name_registered_main) {
+			erlang_pid *self_pid = ei_self(&ec);
+			if (self_pid != nullptr && ei_global_register(fd, "godot_server", self_pid) == 0) {
+				printf("Godot CNode: ✓ Registered global name 'godot_server'\n");
+				fflush(stdout);
+				name_registered_main = true;
+			} else {
+				fprintf(stderr, "Godot CNode: Warning: Failed to register global name 'godot_server' (errno: %d, %s)\n", errno, strerror(errno));
+				fflush(stderr);
+			}
+		}
+
 		/* Receive message - use select() to wait for data before calling ei_receive_msg */
 		struct timeval wait_start;
 		gettimeofday(&wait_start, NULL);
@@ -1917,6 +1929,22 @@ int process_cnode_frame(void) {
 				fflush(stdout);
 			}
 
+			// Register global name "godot_server" so Erlang processes can send messages to it
+			// This must be done after accepting a connection (global names require a connection to an Erlang node)
+			// According to: https://www.erlang.org/doc/apps/erl_interface/ei_users_guide.html#using-global-names
+			static bool name_registered = false;
+			if (!name_registered) {
+				erlang_pid *self_pid = ei_self(&ec);
+				if (self_pid != nullptr && ei_global_register(fd, "godot_server", self_pid) == 0) {
+					printf("Godot CNode: ✓ Registered global name 'godot_server'\n");
+					fflush(stdout);
+					name_registered = true;
+				} else {
+					fprintf(stderr, "Godot CNode: Warning: Failed to register global name 'godot_server' (errno: %d, %s)\n", errno, strerror(errno));
+					fflush(stderr);
+				}
+			}
+
 			// Store connection for next frame
 			current_fd = fd;
 
@@ -1983,6 +2011,13 @@ CNodeServer::CNodeServer() : initialized(false), cookie_copy(nullptr) {
 }
 
 CNodeServer::~CNodeServer() {
+	// Cleanup: close listen_fd if still open
+	if (listen_fd >= 0) {
+		close(listen_fd);
+		listen_fd = -1;
+	}
+
+	// Clean up cookie string
 	if (cookie_copy != nullptr) {
 		delete[] cookie_copy;
 		cookie_copy = nullptr;

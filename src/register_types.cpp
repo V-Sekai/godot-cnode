@@ -167,26 +167,21 @@ void uninitialize_cnode_module(ModuleInitializationLevel p_level) {
 	}
 
 	// Clean up CNodeServer node
+	// During shutdown, be very careful - Godot objects may already be destroyed
+	// Avoid calling Godot API functions during shutdown as they may crash
+
+	// Close listen_fd to stop accepting connections (safe - just a file descriptor)
+	if (listen_fd >= 0) {
+		close(listen_fd);
+		listen_fd = -1;
+	}
+
+	// During shutdown, Godot will automatically clean up nodes in the scene tree
+	// We should NOT try to manually delete nodes during shutdown as the scene tree
+	// may already be destroyed, causing crashes
+	// Just clear the pointer - let Godot handle the cleanup
 	if (cnode_server_node != nullptr) {
-		UtilityFunctions::print("Godot CNode GDExtension: Removing CNodeServer node...");
-
-		// Close listen_fd to stop accepting connections
-		if (listen_fd >= 0) {
-			close(listen_fd);
-			listen_fd = -1;
-		}
-
-		// Remove node from scene tree
-		Node *node = Object::cast_to<Node>(cnode_server_node);
-		if (node != nullptr && node->get_parent() != nullptr) {
-			node->get_parent()->remove_child(node);
-		}
-
-		// Delete the node
-		memdelete(cnode_server_node);
 		cnode_server_node = nullptr;
-
-		UtilityFunctions::print("Godot CNode GDExtension: CNodeServer node removed");
 	}
 }
 

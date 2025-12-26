@@ -42,10 +42,10 @@ defmodule GodotCNodeGenServerRPCTest do
     IO.puts("")
 
     # Test 1: GenServer call to erlang:node
-    IO.puts("1. Testing GenServer call: {'\$gen_call', {From, Tag}, {:erlang, :node, []}}")
+    IO.puts("1. Testing GenServer call: {:\"$gen_call\", {From, Tag}, {:erlang, :node, []}}")
     from = self()
     ref = make_ref()
-    gen_call_message = {'$gen_call', {from, ref}, {:erlang, :node, []}}
+    gen_call_message = {:"$gen_call", {from, ref}, {:erlang, :node, []}}
 
     case :erlang.send({:godot_server, cnode_name}, gen_call_message) do
       ^gen_call_message ->
@@ -68,7 +68,7 @@ defmodule GodotCNodeGenServerRPCTest do
     IO.puts("2. Testing GenServer call with invalid function (should return error)")
     from2 = self()
     ref2 = make_ref()
-    gen_call_message2 = {'$gen_call', {from2, ref2}, {:godot, :invalid_function, []}}
+    gen_call_message2 = {:"$gen_call", {from2, ref2}, {:godot, :invalid_function, []}}
 
     case :erlang.send({:godot_server, cnode_name}, gen_call_message2) do
       ^gen_call_message2 ->
