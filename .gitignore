@@ -43,3 +43,4 @@ erl_crash.dump
 .pre-commit-cache/
 scenetree_properties_*.txt
 bin/test_cnode_unit
+test/*.log

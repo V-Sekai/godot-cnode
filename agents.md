@@ -37,8 +37,11 @@ Custom socket callbacks provide macOS compatibility:
 - **Custom `accept` callback** - Bypasses `SO_ACCEPTCONN` checks that fail on macOS
 - **Delegates other operations** - Most socket operations use default `erl_interface` implementations
 - **Blocking mode enforcement** - Ensures sockets are in blocking mode for reliable operation
+- **Uses `ei_connect_xinit_ussi`** - Initializes CNode with custom socket callbacks for macOS support
 
 **Location**: `src/godot_cnode.cpp` - `macos_tcp_accept()`, `custom_socket_callbacks`
+
+**Implementation**: The custom socket callbacks structure delegates most operations to `ei_default_socket_callbacks`, but overrides the `accept` callback with `macos_tcp_accept()` which directly calls `accept()` after ensuring the socket is in blocking mode.
 
 ## Communication Patterns
 
@@ -137,6 +140,19 @@ if (strcmp(atom, "$gen_call") != 0 && strcmp(atom, "$gen_cast") != 0) {
 }
 ```
 
+### RPC Message Format (Rex)
+
+**Pattern**: `{rex, From, {'$gen_call', {From, Tag}, Request}}`
+
+**Flow**:
+1. Elixir client sends message to registered name using `:erlang.send()`
+2. CNode receives message in `rex` format (RPC message format)
+3. `process_message()` detects `rex` atom and extracts the GenServer call
+4. Routes to `handle_call()` with extracted From PID and Tag
+5. Reply is sent back to the client
+
+**Note**: When sending to a registered global name (e.g., `:godot_server`), Erlang wraps the message in a `rex` tuple. The CNode handles this format by extracting the inner GenServer call message.
+
 ## Message Routing
 
 ### Module-Based Routing
@@ -172,50 +188,72 @@ The CNode routes messages based on the module name:
 
 ### macOS Compatibility
 
-**Issue**: `SO_ACCEPTCONN` socket option is not supported on macOS, causing `ei_accept()` and `ei_receive_msg()` to fail with `errno 42` (Protocol not available).
+**Issue**: `SO_ACCEPTCONN` socket option is not supported on macOS, causing `ei_accept()` to fail with `errno 42` (Protocol not available) when using default socket callbacks.
 
 **Solution**: Custom socket callbacks that bypass the problematic checks:
 
-1. **Custom `accept` callback** - Directly calls `accept()` after ensuring blocking mode
-2. **Error handling** - When `ei_receive_msg()` returns `errno 42`, attempt to process message from buffer or read directly from socket
-3. **Buffer fallback** - If buffer has data, process it despite the error
-4. **Raw socket read** - If buffer is empty, attempt raw `read()` from socket and decode manually
+1. **Use `ei_connect_xinit_ussi`** - Initialize CNode with custom socket callbacks instead of `ei_connect_init`
+2. **Custom `accept` callback** - Directly calls `accept()` after ensuring blocking mode, bypasses `SO_ACCEPTCONN` check
+3. **Delegate other operations** - Most socket operations (socket, close, listen, connect, read, write, etc.) delegate to `ei_default_socket_callbacks`
+4. **Blocking mode enforcement** - Ensures sockets are in blocking mode for reliable operation
 
 **Implementation**:
 ```cpp
 // Custom accept callback
 static int macos_tcp_accept(void **ctx, void *addr, int *len, unsigned unused) {
-    // Extract FD, ensure blocking mode, call accept() directly
-    // Bypasses SO_ACCEPTCONN check
+    int fd, res;
+    socklen_t addr_len = (socklen_t)*len;
+
+    // Extract file descriptor from context
+    res = EI_DFLT_CTX_TO_FD__(*ctx, &fd);
+    if (res) return res;
+
+    // Ensure socket is in blocking mode
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) {
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+
+    // Call accept() directly - bypasses SO_ACCEPTCONN check
+    res = accept(fd, (struct sockaddr *)addr, &addr_len);
+    if (res < 0) return errno;
+
+    *len = (int)addr_len;
+    *ctx = EI_FD_AS_CTX__(res);
+    return 0;
 }
 
-// Error handling in main_loop
-if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
-    if (x.index > 0) {
-        // Process from buffer
-    } else {
-        // Try raw socket read
-        ssize_t bytes_read = read(fd, raw_buf, sizeof(raw_buf));
-        // Decode and process...
-    }
-}
+// Initialize with custom callbacks
+res = ei_connect_xinit_ussi(&ec, thishostname, thisalivename, thisnodename,
+        NULL, cookie, 0,
+        &custom_socket_callbacks,
+        sizeof(custom_socket_callbacks),
+        NULL);
 ```
+
+**Status**: ✅ Fully implemented and working. Both the Godot CNode and standalone test CNode use this approach for macOS compatibility.
 
 ## Connection Lifecycle
 
 1. **Initialization** (`init_cnode`):
-   - Initialize `ei_cnode` structure
-   - Create listening socket with `ei_listen()`
-   - Publish with epmd (with error handling for macOS)
-   - Register global name `godot_server`
+   - Zero-initialize `ei_cnode` structure
+   - Call `ei_init()` to initialize erl_interface library
+   - Initialize CNode with `ei_connect_xinit_ussi()` using custom socket callbacks (macOS compatibility)
+   - Create listening socket with `ei_listen()` to get an ephemeral port
+   - Publish with epmd using `ei_publish()` with the specific port from `ei_listen()`
+   - Keep `publish_fd` open to maintain epmd registration
+   - Store `listen_fd` for accepting connections
 
 2. **Main Loop** (`main_loop`):
-   - Wait for connections with `select()`
-   - Accept connection with `ei_accept()` (using custom callback on macOS)
-   - Receive message with `ei_receive_msg()` (with errno 42 handling)
-   - Process message with `process_message()`
-   - Send reply if needed (for GenServer calls)
-   - Close connection after processing
+   - Wait for connections with `select()` on `listen_fd` (optional, for non-blocking behavior)
+   - Accept connection with `ei_accept()` (uses custom callback on macOS)
+   - Register global name (e.g., `godot_server` or `test_server`) using `ei_global_register()`
+   - Process messages in a loop:
+     - Use `select()` to wait for data before calling `ei_receive_msg()` (prevents blocking on empty connections)
+     - Receive message with `ei_receive_msg()`
+     - Process message with `process_message()`
+     - Send reply if needed (for GenServer calls)
+   - Close connection after processing or on error
 
 3. **Message Processing**:
    - Decode message format (GenServer vs plain)
@@ -235,8 +273,16 @@ if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
 
 ### Connection Errors
 
-- **`ei_accept()` failures**: Retry with exponential backoff
-- **`ei_receive_msg()` errno 42**: Attempt buffer processing or raw socket read
+- **`ei_accept()` failures**: Handle specific error codes:
+  - `EBADF` (9): Socket closed, exit main loop
+  - `ECONNABORTED` (53): Connection aborted, retry
+  - `EINTR`: Interrupted by signal, retry
+  - Other errors: Log and retry after short delay
+- **`ei_receive_msg()` errors**:
+  - `ERL_TICK`: Keepalive message, continue
+  - `ERL_ERROR` with `ECONNRESET`/`EPIPE`: Connection closed, break loop
+  - `ERL_ERROR` with errno 0: May be false positive, check socket state before closing
+  - Use `select()` before `ei_receive_msg()` to avoid blocking on empty connections
 - **Connection aborted**: Retry immediately
 - **Bad file descriptor**: Exit main loop
 
@@ -250,9 +296,21 @@ if (saved_errno == 42 || saved_errno == ENOPROTOOPT) {
 
 ### Test Scripts
 
-- **`test/cnode_test_plain_rpc.exs`**: Tests plain message format (async)
-- **`test/cnode_test_genserver_rpc.exs`**: Tests GenServer call format (sync with replies)
-- **`test/cnode_test_connect.exs`**: Tests basic connectivity
+- **`test/cnode_test_genserver_simple.exs`**: Simple GenServer test
+- **`test/cnode_test_genserver_rpc.exs`**: Full GenServer RPC test with multiple handlers
+- **`test/test_cnode_elixir.exs`**: Test script for standalone CNode
+
+### Standalone CNode Test Implementation
+
+A standalone C-based CNode (`test/test_cnode.c`) has been created for debugging and testing GenServer functionality:
+
+- **Purpose**: Test GenServer message handling without Godot dependencies
+- **Features**: Full GenServer call/cast support, global name registration, macOS socket callbacks
+- **Build**: `cd test && make`
+- **Run**: `./test_cnode test_cnode@127.0.0.1 godotcookie`
+- **Test**: `elixir test/test_cnode_elixir.exs`
+
+**Status**: ✅ Accepts connections, registers with epmd, processes GenServer casts. ⚠️ GenServer calls (sync RPC) need further debugging.
 
 ### Test Patterns
 
@@ -267,13 +325,20 @@ message = {:erlang, :node, []}
 ```elixir
 from = self()
 ref = make_ref()
-gen_call = {'$gen_call', {from, ref}, {:erlang, :node, []}}
+gen_call = {:"$gen_call", {from, ref}, {:erlang, :node, []}}
 :erlang.send({:godot_server, cnode_name}, gen_call)
 receive do
   {^ref, reply} -> # Process reply
 after
   5000 -> # Timeout
 end
+```
+
+**GenServer Cast Test**:
+```elixir
+gen_cast = {:"$gen_cast", {:erlang, :node, []}}
+:erlang.send({:godot_server, cnode_name}, gen_cast)
+# No reply expected - fire and forget
 ```
 
 ## Console Output
@@ -296,3 +361,5 @@ All output is flushed immediately with `fflush(stdout)` for real-time visibility
 - **Message queuing**: Queue messages when Godot is busy
 - **Health checks**: Periodic health check messages
 - **Metrics**: Track message counts, latency, errors
+- **Standalone CNode**: Complete GenServer call (sync RPC) support in standalone test CNode
+- **Connection persistence**: Keep connections open for multiple messages instead of closing after each message
